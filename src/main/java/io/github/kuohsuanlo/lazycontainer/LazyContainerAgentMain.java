@@ -5,102 +5,125 @@ import java.lang.instrument.Instrumentation;
 import java.util.jar.JarFile;
 
 /**
- * Java agent 進入點。以 {@code -javaagent:LazyContainerAgent.jar} 啟動 server。
+ * v2 Java agent 進入點。
  *
- * <p>Paper(paperclip)用隔離 classloader 載入 {@code net.minecraft.*},看不到 -javaagent 所在的 app
- * classloader。因此先把本 jar(純 JDK + relocated ASM)以
- * {@link Instrumentation#appendToBootstrapClassLoaderSearch} 掛到 bootstrap classloader(所有
- * classloader 的共同祖先),讓被 splice 進 NMS {@code BaseContainerBlockEntity} 的方法能透過 parent
- * 委派看到同一份 {@link LazyContainerRuntime};再掛上 {@link LazyContainerTransformer}。</p>
+ * <p>支援 premain (啟動時掛載) 與 agentmain (動態 attach) 兩種模式。</p>
  *
- * <p>骨架對齊 LibSetEntityTick。</p>
+ * <pre>
+ * Phase 3: DetachManager 整合。
+ *   agentmain 支援 args:
+ *     "detach"   — flush pending + unregister + retransform 還原
+ *     "reload"   — flush pending + re-init (重新載入 transformer)
+ *     無 args    — 正常 attach
+ * </pre>
  */
 public final class LazyContainerAgentMain {
 
-    /** 作者署名(無傷大雅)。 */
-    public static final String AUTHOR = "廢土貓大 LogoCat";
-    public static final String SITE = "mcfallout.net";
+    private static LazyContainerTransformer transformer;
 
-    private LazyContainerAgentMain() {
-    }
+    private LazyContainerAgentMain() {}
 
     public static void premain(String args, Instrumentation inst) {
-        signature();
-        bootstrap(inst);
-        install(inst);
+        banner();
+        if (!initVersionAndTransformer()) return;
+        appendToBootstrap(inst);
+        registerTransformer(inst);
         LazyContainerRuntime.maybeStartVerboseLogger();
         Runtime.getRuntime().addShutdownHook(new Thread(
-                () -> System.out.println("[LazyContainer] shutdown stats: " + LazyContainerRuntime.stats()),
-                "LazyContainer-shutdown-stats"));
+                () -> System.out.println("[LazyContainer] final stats: " + LazyContainerRuntime.stats()),
+                "LazyContainer-shutdown"));
     }
 
     public static void agentmain(String args, Instrumentation inst) {
-        signature();
-        bootstrap(inst);
-        install(inst);
+        banner();
+        if (args != null && args.equals("detach")) {
+            DetachManager.detach(inst);
+            return;
+        }
+        if (args != null && args.equals("reload")) {
+            DetachManager.deactivate();
+            // re-init
+            transformer = new LazyContainerTransformer();
+            transformer.init();
+            if (!transformer.isReady()) {
+                System.err.println("[LazyContainer] reload failed: version not supported");
+                return;
+            }
+            appendToBootstrap(inst);
+            registerTransformer(inst);
+            retransformIfLoaded(inst);
+            System.out.println("[LazyContainer] agent reloaded");
+            return;
+        }
+        // normal attach
+        if (!initVersionAndTransformer()) return;
+        appendToBootstrap(inst);
+        registerTransformer(inst);
         LazyContainerRuntime.maybeStartVerboseLogger();
         retransformIfLoaded(inst);
     }
 
-    /**
-     * 作者署名(無傷大雅,純記名、不影響功能):
-     * <ol>
-     *   <li>開機 banner——一行作者/伺服器資訊。</li>
-     *   <li>system property {@code lazycontainer.author}——可被 jcmd / 任何工具讀到。</li>
-     *   <li>一條永遠休眠的 daemon thread,名字帶署名——會出現在 spark / thread dump 的執行緒清單,
-     *       讓 profile 也留得到名(休眠不佔 CPU)。</li>
-     * </ol>
-     */
-    private static void signature() {
-        try {
-            System.setProperty("lazycontainer.author", AUTHOR + " (" + SITE + ")");
-            System.out.println("[LazyContainer] LazyContainerAgent —— crafted by " + AUTHOR + " · 廢土 · " + SITE);
-            Thread sig = new Thread(() -> {
-                try {
-                    Thread.sleep(Long.MAX_VALUE);
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
-                }
-            }, "LazyContainer-signature · " + AUTHOR + " · " + SITE);
-            sig.setDaemon(true);
-            sig.start();
-        } catch (Throwable ignored) {
-            // 署名失敗絕不影響 agent 運作
-        }
+    // ── 內部實作 ──
+
+    private static void banner() {
+        System.out.println("[LazyContainer] LazyContainerAgent v2 — crafted by 廢土貓大 LogoCat · mcfallout.net");
     }
 
-    /** 把本 agent jar 掛到 bootstrap classloader,讓被注入的 NMS 類找得到 LazyContainerRuntime。 */
-    private static void bootstrap(Instrumentation inst) {
+    /** 版本偵測 + transformer 初始化。失敗時 agent 不啟動。 */
+    private static boolean initVersionAndTransformer() {
+        VersionDetector.McVersion v = VersionDetector.detect();
+        if (v == VersionDetector.McVersion.UNKNOWN) {
+            System.err.println("[LazyContainer] FATAL: could not detect MC version; agent DISABLED");
+            return false;
+        }
+        if (NmsRegistry.forVersion(v) == null) {
+            String reason;
+            if (v == VersionDetector.McVersion.V1_12_2) {
+                reason = "ContainerHelper class does not exist in 1.12.2 (introduced in 1.13). "
+                       + "This agent architecture depends on ContainerHelper interception.";
+            } else {
+                reason = "no NMS mapping registered for this version.";
+            }
+            System.err.println("[LazyContainer] FATAL: MC version " + v + " not supported — " + reason);
+            System.err.println("[LazyContainer]        use -Dlazycontainer.version=1.xx.x to override,"
+                    + " or add mapping to NmsRegistry.java");
+            return false;
+        }
+        transformer = new LazyContainerTransformer();
+        transformer.init();
+        return true;
+    }
+
+    private static void appendToBootstrap(Instrumentation inst) {
         try {
             File self = new File(
                     LazyContainerAgentMain.class.getProtectionDomain().getCodeSource().getLocation().toURI());
             inst.appendToBootstrapClassLoaderSearch(new JarFile(self));
-            System.out.println("[LazyContainer] appended to bootstrap classpath: " + self);
         } catch (Throwable t) {
             System.err.println("[LazyContainer] FATAL: appendToBootstrapClassLoaderSearch failed: " + t);
-            t.printStackTrace();
         }
     }
 
-    private static void install(Instrumentation inst) {
-        inst.addTransformer(new LazyContainerTransformer(), true);
-        System.out.println("[LazyContainer] agent installed (transformer registered)"
+    private static void registerTransformer(Instrumentation inst) {
+        inst.addTransformer(transformer, true);
+        ContainerHelperInterceptor.active = true;
+        LazyContainerRuntime.injected = true;
+        DetachManager.registeredTransformer = transformer;
+        System.out.println("[LazyContainer] transformer registered"
                 + (LazyContainerRuntime.shadow() ? " [SHADOW mode]" : ""));
     }
 
-    /** agentmain(動態 attach)時:目標 NMS 類可能已載入,逐一 retransform。 */
     private static void retransformIfLoaded(Instrumentation inst) {
-        if (!inst.isRetransformClassesSupported()) {
-            return;
-        }
+        if (!inst.isRetransformClassesSupported()) return;
         for (Class<?> c : inst.getAllLoadedClasses()) {
             String n = c.getName();
-            if (n.equals("net.minecraft.world.level.block.entity.BaseContainerBlockEntity")
+            if (n.equals("net.minecraft.world.ContainerHelper")
                     || n.equals("net.minecraft.world.level.block.entity.ChestBlockEntity")
                     || n.equals("net.minecraft.world.level.block.entity.BarrelBlockEntity")
                     || n.equals("net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity")) {
                 try {
                     inst.retransformClasses(c);
+                    System.out.println("[LazyContainer] retransformed " + n);
                 } catch (Throwable t) {
                     System.err.println("[LazyContainer] retransform failed for " + n + ": " + t);
                 }

@@ -12,3 +12,26 @@ nms-lib/
 .cptest/
 *.log
 srt/
+
+# Paper jars (NMS scanner 下載)
+paper-jars/
+mojang-jars/
+
+# 個人筆記 / 本地討論記錄
+docs/notes/
+*.local.md
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Python (scan_nms.py)
+__pycache__/
+*.pyc
+.codegraph/
+
+# IDE (Eclipse JDT LS)
+.classpath
+.project
+.settings/

@@ -1,6 +1,6 @@
 # LazyContainerAgent
 
-**繁體中文** ｜ [English](docs/README.en.md)
+**繁體中文** ｜ [English](README.en.md)
 
 > **箱子物品「延遲反序列化 + 沒碰過就原樣寫回」的 Java agent。**
 > 把 chunk 載入時「立刻把每個箱子的物品從 NBT 解包」與卸載時「重新打包」這兩筆白工砍掉。
@@ -42,7 +42,7 @@ java ... \
 | 1.12.2 | Java 8  | ❌ 不支援 (ContainerHelper 不存在) |
 
 啟動時自動偵測 MC 版本（讀 `MinecraftServer` classfile major + 常數池掃描）。
-偵測失敗可用 `-Dlazycontainer.version=1.21.11` 手動指定。詳細狀態定義見 [`docs/PROGRESS.md`](docs/PROGRESS.md)。
+偵測失敗可用 `-Dlazycontainer.version=1.21.11` 手動指定。詳細狀態定義見 [`docs/PROGRESS.md`](PROGRESS.md)。
 
 ---
 
@@ -82,47 +82,6 @@ bash build.sh        # JDK 21+; 產出 target/LazyContainerAgent.jar
 ```
 
 不再需要 `nms-lib/` 目錄與 template 編譯步驟。
-
-### CI 產出檔名說明
-
-GitHub Actions 會在 JDK 21 / 22 / 23 三個版本上分別建置，產出：
-
-```
-LazyContainerAgent-<版本>-jdk21.jar
-LazyContainerAgent-<版本>-jdk22.jar
-LazyContainerAgent-<版本>-jdk23.jar
-```
-
-版本號規則：
-- **Tag build**（`git tag v1.0`）→ 產出 `LazyContainerAgent-1.0-jdk21.jar`（自動去掉 `v`）
-- **Dev nightly** → `pom.xml` 版本 + commit short sha，如 `LazyContainerAgent-1.1-SNAPSHOT-abc1234-jdk21.jar`
-
-### 發行流程
-
-使用 `tools/bump_version.sh` 管理版本：
-
-```bash
-# 開發階段：升到下一版
-bash tools/bump_version.sh minor        # 1.0 → 1.1-SNAPSHOT, commit 不 tag
-
-# 準備發行：去掉 -SNAPSHOT，打 tag
-bash tools/bump_version.sh release      # 1.1-SNAPSHOT → 1.1, tag v1.1
-git push && git push --tags             # CI 自動產 release
-
-# 發行後：升到下一版
-bash tools/bump_version.sh minor        # 1.1 → 1.2-SNAPSHOT
-git push
-```
-
-詳細流程及 CI 守門員規則見 [`docs/notes/PR.md`](docs/notes/PR.md)。
-
-**三個 JAR 內容完全一樣**（agent target Java 21 bytecode），只是確保 agent 在不同 JDK 下都能正常編譯與執行。使用者只需挑選跟 **伺服器執行的 JDK 主版本號** 相同的檔案即可：
-
-- 伺服器用 JDK 21 → 下載 `*-jdk21.jar`
-- 伺服器用 JDK 22 → 下載 `*-jdk22.jar`
-- 伺服器用 JDK 23 → 下載 `*-jdk23.jar`
-
-若不確定伺服器 JDK 版本，執行 `java -version` 查看。任何一個都能用，只是檔名標示便於辨識。
 
 ---
 

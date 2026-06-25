@@ -20,7 +20,7 @@ cd .lctest && bash run-test.sh
 cd .lctest && bash play.sh
 ```
 前景啟動(此終端就是 console,打 `stop` 結束),預設開 **shadow + verbose**。
-用你自己的 Minecraft client 連 `<這台機器IP>:25801`(離線模式,任何名字都能進)。建議清單:
+用你自己的 Minecraft client 連 `<這臺機器IP>:25801`(離線模式,任何名字都能進)。建議清單:
 - 放箱子/木桶/界伏盒,塞各種物品(附魔裝、命名、藥水、含 NBT 的東西)、**雙箱**。
 - `stop` 重啟,回去開箱 → 東西在不在、數量對不對。
 - 漏斗對著箱子抽/灌;比較器讀箱子滿度;破壞**裝滿的界伏盒** → 掉落物含內容。
@@ -41,7 +41,7 @@ cd .lctest && bash play.sh /tmp/realworld-copy
 |---|---|
 | `stash` | 載入時擷取 raw、跳過 decode 的容器數(lazy 載入生效) |
 | `ensure` | 首次被存取而真正 decode 的次數 |
-| `rawSave` | 卸載時逐位元組回寫 raw、跳過 encode 的次數(省 encode 生效) |
+| `rawSave` | 解除安裝時逐位元組回寫 raw、跳過 encode 的次數(省 encode 生效) |
 | `eagerLoad` | 退回 eager 載入次數(input 非 TagValueInput;正常應為 0) |
 | `shadowMismatch` | **必須 0**;>0 表示 raw 與 vanilla 輸出有差(已自動改寫 vanilla 那份) |
 

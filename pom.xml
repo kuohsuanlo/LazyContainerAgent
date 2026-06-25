@@ -6,14 +6,15 @@
 
     <groupId>io.github.kuohsuanlo</groupId>
     <artifactId>LazyContainerAgent</artifactId>
-    <version>1.21.11-1</version>
+    <version>1.0.0-SNAPSHOT</version>
     <packaging>jar</packaging>
     <name>LazyContainerAgent</name>
     <description>Lazy container item deserialization / skip-clean-save for plain Paper via a Java agent</description>
 
     <properties>
-        <!-- 輸出 v21 bytecode(NMS=1.21.11=major65=Java21);agent 純 JDK + relocated ASM -->
-        <maven.compiler.release>21</maven.compiler.release>
+        <!-- 輸出 Java 21 bytecode; agent 純 JDK + relocated ASM -->
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <asm.version>9.10.1</asm.version>
     </properties>
