@@ -9,7 +9,7 @@ public final class LazyContainerRuntime {
 
     private LazyContainerRuntime() {}
 
-    public static volatile boolean injected = false;
+    public static volatile boolean active = false;
 
     private static final boolean SHADOW = Boolean.getBoolean("lazycontainer.shadow");
     private static final boolean VERBOSE = Boolean.getBoolean("lazycontainer.verbose");
@@ -28,7 +28,7 @@ public final class LazyContainerRuntime {
     private static final AtomicLong benignDumpN = new AtomicLong();
 
     public static boolean shadow() { return SHADOW; }
-    public static boolean isActive() { return injected; }
+    public static boolean isActive() { return active; }
 
     public static void onStash() { stash.incrementAndGet(); }
     public static void onEnsure() { ensure.incrementAndGet(); }
@@ -86,7 +86,7 @@ public final class LazyContainerRuntime {
             while (true) {
                 try { Thread.sleep(ms); } catch (InterruptedException e) { return; }
                 System.out.println("[LazyContainer] " + stats()
-                        + (shadow() ? " (SHADOW)" : "") + " active=" + injected);
+                        + (shadow() ? " (SHADOW)" : "") + " active=" + active);
             }
         }, "LazyContainer-stats");
         t.setDaemon(true);

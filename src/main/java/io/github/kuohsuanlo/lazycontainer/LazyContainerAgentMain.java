@@ -107,7 +107,7 @@ public final class LazyContainerAgentMain {
     private static void registerTransformer(Instrumentation inst) {
         inst.addTransformer(transformer, true);
         ContainerHelperInterceptor.active = true;
-        LazyContainerRuntime.injected = true;
+        LazyContainerRuntime.active = true;
         DetachManager.registeredTransformer = transformer;
         System.out.println("[LazyContainer] transformer registered"
                 + (LazyContainerRuntime.shadow() ? " [SHADOW mode]" : ""));

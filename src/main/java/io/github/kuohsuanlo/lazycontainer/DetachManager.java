@@ -33,7 +33,7 @@ public final class DetachManager {
     /** 物化所有 pending container + 設 active=false。 */
     public static void flushAndDeactivate() {
         ContainerHelperInterceptor.active = false;
-        LazyContainerRuntime.injected = false;
+        LazyContainerRuntime.active = false;
 
         // ponytail: snapshot key set to avoid concurrent modification
         List<Object> allItems;
