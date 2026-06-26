@@ -53,6 +53,15 @@ public final class NmsRegistry {
     }
 
     static {
+        // 26.2 — mojmap, verified (classfile major 69)
+        // ContainerHelper/TagValueInput/TagValueOutput/ValueInput/ValueOutput 與 1.21.11 相容
+        register(VersionDetector.McVersion.V26_2, baseMojmap()
+                .tagValueInput("net/minecraft/world/level/storage/TagValueInput")
+                .tagValueOutput("net/minecraft/world/level/storage/TagValueOutput")
+                .valueInput("net/minecraft/world/level/storage/ValueInput")
+                .valueOutput("net/minecraft/world/level/storage/ValueOutput")
+                .registryAccess("net/minecraft/core/RegistryAccess"));
+
         // 1.21.11 — mojmap, verified (classfile major 65)
         register(VersionDetector.McVersion.V1_21_11, baseMojmap()
                 .tagValueInput("net/minecraft/world/level/storage/TagValueInput")

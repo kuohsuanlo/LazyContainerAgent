@@ -122,19 +122,10 @@ public final class VersionDetector {
             }
         }
 
-        if (best != null) {
-            detected = best;
-            System.out.println("[LazyContainer] detected MC version: " + best
-                    + " (classfile major " + major + ")");
-            return best;
-        }
-
-        System.err.println("[LazyContainer] WARN: unknown classfile major " + major
-                + "; use -Dlazycontainer.version=1.xx.x to override");
-        System.err.println("[LazyContainer]       supported versions: "
-                + java.util.Arrays.toString(McVersion.values()));
-        detected = McVersion.UNKNOWN;
-        return detected;
+        detected = best;
+        System.out.println("[LazyContainer] detected MC version: " + best
+                + " (classfile major " + major + ")");
+        return best;
     }
 
     /**
@@ -212,7 +203,8 @@ public final class VersionDetector {
         V1_18_2(61, "1.18.2"),
         V1_19_4(61, "1.19.4"),  // same major as 1.18 → 需手動指定
         V1_20_4(63, "1.20.4"),
-        V1_21_11(65, "1.21.11");
+        V1_21_11(65, "1.21.11"),
+        V26_2(69, "26.2");  // Paper 26.2 = Java 25 = classfile major 69
 
         final int classMajor;
         final String versionStr;
