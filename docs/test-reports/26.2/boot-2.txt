@@ -1,0 +1,100 @@
+[LazyContainer] LazyContainerAgent —— crafted by 廢土貓大 LogoCat · 廢土 · mcfallout.net
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+[LazyContainer] appended to bootstrap classpath: /home/logocat/Server/claude-sandbox/.lctest-262/LazyContainerAgent.jar
+[LazyContainer] agent installed (transformer registered)
+Starting org.bukkit.craftbukkit.Main
+2026-06-26T05:46:07.320378109Z ServerMain WARN Advanced terminal features are not available in this environment
+[13:46:07 INFO]: [bootstrap] Running Java 25 (OpenJDK 64-Bit Server VM 25.0.3+9-LTS; Eclipse Adoptium Temurin-25.0.3+9) on Linux 5.15.0-91-generic (amd64)
+[13:46:07 INFO]: [bootstrap] Loading Paper 26.2-26-dev/26.2@193803d (2026-06-21T04:21:03Z) for Minecraft 26.2
+[13:46:07 INFO]: [PluginInitializerManager] Initializing plugins...
+[13:46:07 INFO]: [PluginInitializerManager] Initialized 0 plugins
+[LazyContainer] spliced 2 fields + 7 methods into BaseContainerBlockEntity
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.joml.MemUtil$MemUtilUnsafe (file:/home/logocat/Server/claude-sandbox/.lctest-262/libraries/org/joml/joml/1.10.8/joml-1.10.8.jar)
+WARNING: Please consider reporting this to the maintainers of class org.joml.MemUtil$MemUtilUnsafe
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+[LazyContainer] transformed leaf net/minecraft/world/level/block/entity/ChestBlockEntity
+[LazyContainer] transformed leaf net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity
+[LazyContainer] transformed leaf net/minecraft/world/level/block/entity/BarrelBlockEntity
+[13:46:10 INFO]: Environment: Environment[sessionHost=https://sessionserver.mojang.com, servicesHost=https://api.minecraftservices.com, profilesHost=https://api.mojang.com, name=PROD]
+[13:46:11 INFO]: Loaded 1585 recipes
+[13:46:11 INFO]: Loaded 1688 advancements
+[13:46:11 INFO]: Starting minecraft server version 26.2
+[13:46:11 INFO]: Loading properties
+[13:46:11 INFO]: This server is running Paper version 26.2-26-dev/26.2@193803d (2026-06-21T04:21:03Z) (Implementing API version 26.2.build.26-alpha)
+[13:46:11 INFO]: [spark] This server bundles the spark profiler. For more information please visit https://docs.papermc.io/paper/profiling
+[13:46:11 INFO]: Server Ping Player Sample Count: 12
+[13:46:11 INFO]: Using 4 threads for Netty based IO
+[13:46:11 INFO]: [MoonriseCommon] Paper is using 6 worker threads, 1 I/O threads
+[13:46:11 INFO]: Default game type: SURVIVAL
+[13:46:11 INFO]: Generating keypair
+[13:46:11 INFO]: Starting Minecraft server on *:25802
+[13:46:11 INFO]: Paper: Using libdeflate (Linux x86_64) compression from Velocity.
+[13:46:11 INFO]: Paper: Using OpenSSL 1.1.x (Linux x86_64) cipher from Velocity.
+[13:46:11 INFO]: Server permissions file permissions.yml is empty, ignoring it
+[13:46:11 WARN]: **** SERVER IS RUNNING IN OFFLINE/INSECURE MODE!
+[13:46:11 WARN]: The server will make no attempt to authenticate usernames. Beware.
+[13:46:11 WARN]: While this makes the game possible to play without internet access, it also opens up the ability for hackers to connect with any username they choose.
+[13:46:11 WARN]: To change this, set "online-mode" to "true" in the server.properties file.
+[13:46:11 INFO]: Preparing level "world"
+[13:46:12 INFO]: Loading 25 persistent chunks for level 'minecraft:overworld'...
+[13:46:12 INFO]: Preparing spawn area: 28%
+[13:46:12 INFO]: Prepared spawn area in 90 ms
+[13:46:12 INFO]: Loading 0 persistent chunks for level 'minecraft:the_nether'...
+[13:46:12 INFO]: Prepared spawn area in 0 ms
+[13:46:12 INFO]: Loading 0 persistent chunks for level 'minecraft:the_end'...
+[13:46:12 INFO]: Prepared spawn area in 0 ms
+[13:46:12 INFO]: Done preparing level "world" (0.309s)
+[13:46:12 INFO]: [spark] Starting background profiler...
+[13:46:12 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:overworld
+[13:46:12 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_nether
+[13:46:12 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_end
+[13:46:12 INFO]: ThreadedAnvilChunkStorage (world): All chunks are saved
+[13:46:12 INFO]: ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[13:46:12 INFO]: ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[13:46:12 INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[13:46:12 INFO]: Running delayed init tasks
+[13:46:12 INFO]: Done (5.357s)! For help, type "help"
+[13:46:12 INFO]: *** Currently you are 8 builds behind ***
+[13:46:12 INFO]: *** It is highly recommended to download the latest build from https://papermc.io/downloads/paper ***
+[13:46:12 INFO]: Saving the game (this may take a moment!)
+[13:46:12 INFO]: ThreadedAnvilChunkStorage (world): All chunks are saved
+[13:46:12 INFO]: ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[13:46:12 INFO]: ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[13:46:12 INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[13:46:12 INFO]: Saved the game
+[13:46:14 INFO]: [STDOUT] [io.github.kuohsuanlo.lazycontainer.LazyContainerRuntime] [LazyContainer] stash=1 ensure=0 rawSave=1 eagerLoad=0 shadowMismatch=0 benignReorder=0 active=true
+[13:46:16 INFO]: Stopping the server
+[13:46:16 INFO]: Stopping server
+[13:46:16 INFO]: Saving players
+[13:46:16 INFO]: Saving worlds
+[13:46:16 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:overworld
+[13:46:16 INFO]: [ChunkHolderManager] Waiting 60s for chunk system to halt for world 'minecraft:overworld'
+[13:46:16 INFO]: [ChunkHolderManager] Halted chunk system for world 'minecraft:overworld'
+[13:46:16 INFO]: [ChunkHolderManager] Saving all chunkholders for world 'minecraft:overworld'
+[13:46:16 INFO]: [ChunkHolderManager] Saved 0 block chunks, 0 entity chunks, 0 poi chunks in world 'minecraft:overworld' in 0.00s
+[13:46:16 INFO]: [ChunkHolderManager] Waiting 60s for chunk I/O to halt for world 'minecraft:overworld'
+[13:46:16 INFO]: [ChunkHolderManager] Halted I/O scheduler for world 'minecraft:overworld'
+[13:46:16 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_nether
+[13:46:16 INFO]: [ChunkHolderManager] Waiting 60s for chunk system to halt for world 'minecraft:the_nether'
+[13:46:16 INFO]: [ChunkHolderManager] Halted chunk system for world 'minecraft:the_nether'
+[13:46:16 INFO]: [ChunkHolderManager] Saving all chunkholders for world 'minecraft:the_nether'
+[13:46:16 INFO]: [ChunkHolderManager] Saved 0 block chunks, 0 entity chunks, 0 poi chunks in world 'minecraft:the_nether' in 0.00s
+[13:46:16 INFO]: [ChunkHolderManager] Waiting 60s for chunk I/O to halt for world 'minecraft:the_nether'
+[13:46:16 INFO]: [ChunkHolderManager] Halted I/O scheduler for world 'minecraft:the_nether'
+[13:46:16 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_end
+[13:46:16 INFO]: [ChunkHolderManager] Waiting 60s for chunk system to halt for world 'minecraft:the_end'
+[13:46:16 INFO]: [ChunkHolderManager] Halted chunk system for world 'minecraft:the_end'
+[13:46:16 INFO]: [ChunkHolderManager] Saving all chunkholders for world 'minecraft:the_end'
+[13:46:16 INFO]: [ChunkHolderManager] Saved 0 block chunks, 0 entity chunks, 0 poi chunks in world 'minecraft:the_end' in 0.00s
+[13:46:16 INFO]: [ChunkHolderManager] Waiting 60s for chunk I/O to halt for world 'minecraft:the_end'
+[13:46:16 INFO]: [ChunkHolderManager] Halted I/O scheduler for world 'minecraft:the_end'
+[13:46:16 INFO]: ThreadedAnvilChunkStorage (world): All chunks are saved
+[13:46:16 INFO]: ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[13:46:16 INFO]: ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[13:46:16 INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[13:46:16 INFO]: Waiting for all RegionFile I/O tasks to complete...
+[13:46:16 INFO]: All RegionFile I/O tasks to complete
+[13:46:16 INFO]: [MoonriseCommon] Awaiting termination of worker pool for up to 60s...
+[13:46:16 INFO]: [MoonriseCommon] Awaiting termination of I/O pool for up to 60s...
+[13:46:16 INFO]: [STDOUT] [io.github.kuohsuanlo.lazycontainer.LazyContainerAgentMain] [LazyContainer] shutdown stats: stash=1 ensure=0 rawSave=1 eagerLoad=0 shadowMismatch=0 benignReorder=0

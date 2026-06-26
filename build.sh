@@ -23,6 +23,7 @@ if [ -f "$HOME/.sdkman/bin/sdkman-init.sh" ]; then
 fi
 # If SDKMAN is not available, set JAVA_HOME manually:
 # JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 ; export JAVA_HOME ; export PATH="$JAVA_HOME/bin:$PATH"
+# 注意:對 26.2 mojmap NMS 編譯 template 時需 JDK 25 (major 69),nms-lib/ 放 26.2 server jar。
 
 WITH_TEMPLATE=false
 if [[ "${1:-}" == "--with-template" ]]; then

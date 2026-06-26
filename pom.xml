@@ -12,7 +12,8 @@
     <description>Lazy container item deserialization / skip-clean-save for plain Paper via a Java agent</description>
 
     <properties>
-        <!-- 輸出 Java 21 bytecode; agent 純 JDK + relocated ASM -->
+        <!-- 輸出 Java 21 bytecode; agent 純 JDK + relocated ASM,於 Java 25 server 上跑無虞;
+             template 由 build.sh 另以 JDK 25 對 26.2 mojmap NMS(major69)編譯後注入(啟用 with-template 時) -->
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
