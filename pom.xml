@@ -27,8 +27,7 @@
     </repositories>
 
     <dependencies>
-        <!-- 純 JDK + ASM:整個 jar 掛到 bootstrap classloader,不可參照 bukkit/NMS。
-             template 另外對真實 NMS 編譯後由 build.sh 注入 jar,不在此編譯單元。 -->
+        <!-- 純 JDK + ASM:整個 jar 掛到 bootstrap classloader,不可參照 bukkit/NMS。 -->
         <dependency>
             <groupId>org.ow2.asm</groupId>
             <artifactId>asm</artifactId>
@@ -44,7 +43,34 @@
             <artifactId>asm-commons</artifactId>
             <version>${asm.version}</version>
         </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.11.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm-util</artifactId>
+            <version>${asm.version}</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
+
+    <developers>
+        <developer>
+            <id>kuohsuanlo</id>
+            <name>LogoCat</name>
+            <url>https://mcfallout.net</url>
+            <roles><role>original author</role></roles>
+        </developer>
+        <developer>
+            <id>yomisana</id>
+            <name>優米撒那</name>
+            <url>https://yomisana.xyz</url>
+            <roles><role>contributor</role></roles>
+        </developer>
+    </developers>
 
     <build>
         <finalName>LazyContainerAgent</finalName>
