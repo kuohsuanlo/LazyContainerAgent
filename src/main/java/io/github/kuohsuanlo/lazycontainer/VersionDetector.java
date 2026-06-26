@@ -198,7 +198,7 @@ public final class VersionDetector {
     public enum McVersion {
         UNKNOWN(0, "unknown"),
         V1_12_2(52, "1.12.2"),
-        V1_16_5(52, "1.16.5"),  // same major as 1.12 → 需手動指定或額外 heuristic
+        V1_16_5(52, "1.16.5"),  // detected but NOT SUPPORTED (no TagValueInput/ValueIO in 1.16.5)
         V1_17_1(60, "1.17.1"),
         V1_18_2(61, "1.18.2"),
         V1_19_4(61, "1.19.4"),  // same major as 1.18 → 需手動指定

@@ -99,16 +99,15 @@ public final class NmsRegistry {
                 .valueInput("net/minecraft/world/level/storage/ValueInput")
                 .valueOutput("net/minecraft/world/level/storage/ValueOutput"));
 
-        // 1.16.5 — Spigot deobfuscated (classfile major 52, same as 1.12)
-        // ContainerHelper exists, but package naming differs from mojmap.
-        // Paper 1.16.5 uses Spigot mappings: containerHelper is in v1_16_R3 package.
-        // REVIEW: needs verification with actual Paper 1.16.5 server jar.
-        register(VersionDetector.McVersion.V1_16_5, baseMojmap()
-                .containerHelper("net/minecraft/server/v1_16_R3/ContainerHelper")
-                .tagValueInput("net/minecraft/server/v1_16_R3/TagValueInput")
-                .tagValueOutput("net/minecraft/server/v1_16_R3/TagValueOutput")
-                .valueInput("net/minecraft/server/v1_16_R3/ValueInput")
-                .valueOutput("net/minecraft/server/v1_16_R3/ValueOutput"));
+        // 1.16.5 (classfile major 52) — NOT SUPPORTED by v2 architecture.
+        // v2 intercepts ContainerHelper.loadAllItems(ValueInput, NonNullList),
+        // but 1.16.5 has NO TagValueInput/ValueInput/ValueOutput classes
+        // (those were added in 1.17).  ContainerHelper.loadAllItems in 1.16.5
+        // takes (CompoundTag, NonNullList) instead — a completely different
+        // signature that the current interceptor does not handle.
+        // To support 1.16.5, a separate injection path for the older signature
+        // would need to be added.  For now, agent will print "not supported".
+        // V1_16_5 remains in VersionDetector to avoid "unknown major" warnings.
 
         // 1.12.2 — NO ContainerHelper class (ContainerHelper was introduced in 1.13).
         // Agent architecture depends on ContainerHelper interception → NOT SUPPORTED.
