@@ -45,7 +45,10 @@ public final class NmsRegistry {
                 .leafClasses(Arrays.asList(
                         "net/minecraft/world/level/block/entity/ChestBlockEntity",
                         "net/minecraft/world/level/block/entity/BarrelBlockEntity",
-                        "net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity"))
+                        "net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity",
+                        "net/minecraft/world/level/block/entity/HopperBlockEntity",
+                        "net/minecraft/world/level/block/entity/DispenserBlockEntity",
+                        "net/minecraft/world/level/block/entity/AbstractFurnaceBlockEntity"))
                 .containerFieldNames(Arrays.asList("items", "itemStacks"));
     }
 

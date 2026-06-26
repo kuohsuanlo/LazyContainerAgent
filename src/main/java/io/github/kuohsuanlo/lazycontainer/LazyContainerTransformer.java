@@ -59,7 +59,7 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
     private static final String RUNTIME = "io/github/kuohsuanlo/lazycontainer/LazyContainerRuntime";
     private static final String INTERCEPTOR = "io/github/kuohsuanlo/lazycontainer/ContainerHelperInterceptor";
 
-    private String CHEST, BARREL, SHULKER;
+    private String CHEST, BARREL, SHULKER, HOPPER, DISPENSER, ABSTRACT_FURNACE;
     private String CH, VIN, TVI, TAG, COMPOUND, NNL;
     private String D_LOAD, D_SAVE2, D_SAVE3;
     private boolean ready = false;
@@ -78,6 +78,9 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
         CHEST = P + "ChestBlockEntity";
         BARREL = P + "BarrelBlockEntity";
         SHULKER = P + "ShulkerBoxBlockEntity";
+        HOPPER = P + "HopperBlockEntity";
+        DISPENSER = P + "DispenserBlockEntity";
+        ABSTRACT_FURNACE = P + "AbstractFurnaceBlockEntity";
 
         CH = m.containerHelper();
         VIN = m.valueInput();
@@ -99,7 +102,8 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
             if (CH.equals(className)) {
                 return transformContainerHelper(classfileBuffer);
             }
-            if (CHEST.equals(className) || BARREL.equals(className) || SHULKER.equals(className)) {
+            if (CHEST.equals(className) || BARREL.equals(className) || SHULKER.equals(className)
+                    || HOPPER.equals(className) || DISPENSER.equals(className) || ABSTRACT_FURNACE.equals(className)) {
                 return transformLeaf(classfileBuffer, className);
             }
         } catch (Throwable t) {
@@ -251,13 +255,11 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
      * </pre>
      *
      * <pre>
-     * REVIEW(D6): 目前只處理 Chest/Barrel/ShulkerBox。
-     * 其他容器 (Hopper, Dispenser, Furnace 等) 若也不 override getItems(),
-     * 則方法不存在於 class bytes → 不會被注入 → 沒有 lazy。
-     * 但 ContainerHelper.loadAllItems 的 stash 仍會發生 (onLoadItem 傳 null container)。
-     * 這些容器的 ensure 要嘛不觸發 (items 永遠 pending → save 時 raw writeback),
-     * 要嘛透過其他路徑觸發 (如 hopper 的推拉物品會呼叫 setItem,走 save 路徑)。
-     * 完整支援:需在 BaseContainerBlockEntity 層級處理,或用 ClassNode 掃全部方法。
+     * REVIEW(D6): 支援的容器:
+     *   - Chest/Barrel/ShulkerBox (RandomizableContainer 子類)
+     *   - Hopper/Dispenser (RandomizableContainer 子類,有自己的 getItems)
+     *   - AbstractFurnace (有自己的 getItems,涵蓋 Furnace/Smoker/BlastFurnace)
+     * Dropper 繼承 Dispenser → 已覆蓋。
      * </pre>
      */
     private byte[] transformLeaf(byte[] buffer, String className) {
