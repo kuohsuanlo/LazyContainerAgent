@@ -1,6 +1,8 @@
 package io.github.kuohsuanlo.lazycontainer;
 
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * MC 版本偵測 — 讀取 MinecraftServer class 的 classfile major version。
@@ -85,25 +87,33 @@ public final class VersionDetector {
         }
     }
 
-    private static McVersion fromBytes(byte[] classBytes) {
+    static McVersion fromBytes(byte[] classBytes) {
         if (classBytes.length < 8) return McVersion.UNKNOWN;
         int major = ((classBytes[6] & 0xFF) << 8) | (classBytes[7] & 0xFF);
 
-        // 1. Try exact match by major version first
-        McVersion best = null;
+        // 1. Collect all candidates matching this major version
+        List<McVersion> candidates = new ArrayList<>();
         for (McVersion v : McVersion.values()) {
             if (v.classMajor == major && v != McVersion.UNKNOWN) {
-                best = v;
-                break;
+                candidates.add(v);
             }
         }
 
-        // 2. If multiple versions share this major (e.g. 1.12 & 1.16 both major 52),
-        //    scan constant pool for a version string to disambiguate.
-        if (best != null && major == 52) {
+        if (candidates.isEmpty()) {
+            System.err.println("[LazyContainer] WARN: unknown classfile major " + major
+                    + "; use -Dlazycontainer.version=1.xx.x to override");
+            System.err.println("[LazyContainer]       supported versions: "
+                    + java.util.Arrays.toString(McVersion.values()));
+            detected = McVersion.UNKNOWN;
+            return detected;
+        }
+
+        // 2. If multiple versions share this major, scan CP for a version string
+        McVersion best = candidates.get(0);
+        if (candidates.size() > 1) {
             String cpVersion = scanConstantPoolForVersion(classBytes);
             if (cpVersion != null) {
-                for (McVersion v : McVersion.values()) {
+                for (McVersion v : candidates) {
                     if (v.versionStr.equals(cpVersion)) {
                         best = v;
                         break;
