@@ -2,8 +2,10 @@
 
 **中文** ｜ [English](README.en.md)
 
-> **箱子物品「延遲反序列化 + 沒碰過就原樣寫回」的 Java agent。**
-> 針對 Paper 26.2,把 chunk 載入時「立刻把每個箱子的物品從 NBT 解包」與卸載時「重新打包」這兩筆白工砍掉。
+> **箱子物品「延遲反序列化(不急著把資料拆解成遊戲內物件,拖到真的要用才拆)+ 沒碰過就原樣寫回」的 Java agent。**
+> 針對 Paper 26.2,把 chunk(遊戲世界切成一塊一塊的地圖區域,伺服器以此為單位載入/卸載)載入時「立刻把每個箱子的物品從 NBT(Minecraft 儲存物品/方塊資料的二進位格式)解包」與卸載時「重新打包」這兩筆白工砍掉。
+
+🧠 **經 Claude Fable 5 對抗審計**(49 個獨立 agent 分工找碴+交叉反駁,詳見 [`FABLE5-AUDIT.md`](FABLE5-AUDIT.md)):14 條發現全數逐一核實、0 條被推翻;確認**記憶體有界不洩漏、存檔淨省不做白工、正常玩家操作零掉物風險**;找到並已修復一個需要管理員指令才會踩到的邊角漏洞(容器複製/直接改存檔資料時可能共用到同一份資料)。
 
 ⚠️ **這不是外掛(plugin),是 Java agent** —— 用 `-javaagent:` 掛在 JVM 上,**不要丟 `plugins/`**(丟了沒用)。
 
@@ -123,14 +125,14 @@ vanilla 載入一個放滿地圖畫/唱片的箱子,光把物品從 NBT 解出�
 
 ## 架構(怎麼注入的)
 
-純 plugin 無法覆寫 NMS final 方法,所以用 **Java agent + ASM bytecode 注入**:
+純外掛(plugin)無法覆寫 NMS(Minecraft 伺服器內部程式碼)裡標記 `final`(禁止被子類別覆寫)的方法,所以用 **Java agent + ASM(操作 Java bytecode、能在類別載入當下動態改寫它的工具)注入**:
 
-1. **`LazyContainerAgentMain`**(premain):把整個 jar `appendToBootstrapClassLoaderSearch` 掛上 bootstrap classloader(繞過 Paper 隔離 classloader),再註冊 transformer。
-2. **`LazyContainerTransformer`**(ASM):
-   - 把 **`LazyContainerTemplate`**(用 plain Java 對「真實 NMS」編譯出的邏輯)splice 進 `BaseContainerBlockEntity`(欄位 + 方法,owner remap)。→ **編譯器驗證簽章,比手寫 ASM 安全。**
-   - 在三個 leaf 的 `getItems/getContents/setItems` 入口插 guard、把 load/save 的 `ContainerHelper` 呼叫 redirect 成延遲版。
-3. **`LazyContainerRuntime`**(bootstrap、純 JDK):shadow 開關 + 計數器。
-4. **安全鐵律**:base(superclass)沒 splice 成功就**完全不動 leaf** → 退回純 vanilla,絕不產生 `NoSuchMethodError`;任何例外 → 回傳原 bytes。
+1. **`LazyContainerAgentMain`**(premain,JVM 啟動時最先跑的進入點):把整個 jar 用 `appendToBootstrapClassLoaderSearch` 掛上 bootstrap classloader(JVM 最底層、所有類別載入器共同的祖先,這樣才能繞過 Paper 把 Minecraft 內部程式碼隔離起來的機制),再註冊 transformer(下面第 2 點的類別改寫器)。
+2. **`LazyContainerTransformer`**(執行實際改寫的 ASM 邏輯):
+   - 把 **`LazyContainerTemplate`**(用一般 Java 語法、對著「真實的 Minecraft 伺服器內部程式碼」編譯出來的邏輯,而不是手刻 bytecode)splice(接枝:把外來的欄位/方法插進既有類別)進 `BaseContainerBlockEntity`(所有容器方塊共同的父類別)。→ **編譯器會幫忙驗證方法簽章對不對,比手寫 bytecode 安全得多。**
+   - 在箱子/木桶/界伏盒這三個實際子類別(繼承鏈最底層的類別,術語叫 leaf)的 `getItems/getContents/setItems` 入口插「守門檢查」(guard,判斷這容器還沒被解碼、要不要先補解碼)、把 load/save 裡呼叫 `ContainerHelper` 的地方改成呼叫延遲版邏輯。
+3. **`LazyContainerRuntime`**(掛在 bootstrap classloader、純 JDK 沒有依賴任何 Minecraft 類別):shadow(驗證模式)開關 + 計數器。
+4. **安全鐵律**:父類別(base/superclass)沒改寫成功,就**完全不動子類別(leaf)** → 整個退回純原版行為,絕不會產生「方法不存在」這類崩潰性錯誤(`NoSuchMethodError`);過程中任何例外 → 回傳原本沒改過的 bytecode。
 
 ---
 
@@ -140,15 +142,16 @@ vanilla 載入一個放滿地圖畫/唱片的箱子,光把物品從 NBT 解出�
 
 - **沒碰的箱子** → 寫回的是載入時讀到的同一份 bytes(逐位元組相同),沒經轉換。
 - **被碰的箱子** → 跟 vanilla 一模一樣地解碼、再一模一樣地存回。
-- 只動箱子的 `Items`,不碰地形 / 方塊 / 實體 / 光照 / 其他 BE。
+- 只動箱子的 `Items`(容器裡的物品清單),不碰地形 / 方塊 / 實體 / 光照 / 其他 BE(BlockEntity,附在方塊上、替它存額外資料的物件,例如告示牌的文字、箱子的內容物)。
 
 已驗證:
-- **離線 JVM bytecode 驗證**:注入的 4 個類別全通過 link/verify。
-- **真實 Paper 26.2 端對端**:放物品(diamond×42 / sword{damage:10} / netherite×7)→重啟→重載,**逐字相同**(含 data-component);shadow 真實世界 56 容器 `shadowMismatch=0`。詳見 [`docs/test-reports/26.2.md`](docs/test-reports/26.2.md)。
-- **對抗審查(8 種失效模式 × 對抗驗證)**:**0 個會改/掉資料的路徑**;查到 2 個無關痛癢的 byte-identity 小差異,已修。
-- **DFU 跨版本**:stash 的 raw 本來就是「DataFixerUpper 升級後」的(DFU 在 chunk-tag 層、BE 建立前跑完),回寫的也是升級後版本。
+- **離線 JVM bytecode 驗證**:注入的 4 個類別全通過 link/verify(JVM 載入類別時檢查 bytecode 合不合法的機制)。
+- **真實 Paper 26.2 端對端**:放物品(diamond×42 / sword{damage:10} / netherite×7)→重啟→重載,**逐字相同**(含 data-component,1.20.5 之後 Minecraft 用來描述物品屬性——附魔、耐久、自訂名稱等——的資料格式);shadow 真實世界 56 容器 `shadowMismatch=0`。詳見 [`docs/test-reports/26.2.md`](docs/test-reports/26.2.md)。
+- **對抗審查(8 種失效模式 × 對抗驗證)**:**0 個會改/掉資料的路徑**;查到 2 個無關痛癢的 byte-identity(逐位元組完全相同)小差異,已修。
+- **Fable 5 二輪對抗審計**(49 agent,更大規模、針對現行程式碼):同樣 **0 個會掉物的路徑**,額外找到並修復 1 個管理員指令才會踩到的邊角漏洞。詳見 [`FABLE5-AUDIT.md`](FABLE5-AUDIT.md)。
+- **DFU 跨版本**:暫存的原始資料本來就是「DFU(DataFixerUpper,Minecraft 用來把舊版存檔資料自動升級成新版格式的機制)升級後」的版本(DFU 在區塊資料被讀出來的最早期、BE 物件都還沒建立前就跑完了),回寫的自然也是升級後的版本,不會有跨版本相容性問題。
 
-詳見 [`FINDINGS.md`](FINDINGS.md)、[`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md)。
+詳見 [`FINDINGS.md`](FINDINGS.md)、[`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md)、[`FABLE5-AUDIT.md`](FABLE5-AUDIT.md)。
 
 ---
 
@@ -175,12 +178,12 @@ vanilla 載入一個放滿地圖畫/唱片的箱子,光把物品從 NBT 解出�
 ## 建置
 
 ```bash
-bash build.sh        # JDK 21;產出 target/LazyContainerAgent.jar
+bash build.sh        # 需要 JDK 25(見下);產出 target/LazyContainerAgent.jar
 ```
-需要 `nms-lib/`(你的伺服器核心 Paper 的 NMS 編譯相依 libraries,供 `template/` 對真實 NMS 編譯)。
+需要 `nms-lib/`(你的伺服器核心 Paper 的 NMS 編譯相依 libraries,供 `template/` 對真實 NMS 編譯;NMS = Minecraft 伺服器內部程式碼)。
 此目錄不入 git(太大、含 Mojang/Paper 產物),建置前自行放好。
 
-流程:① `mvn package`(agent 類別 + shade/relocate ASM + manifest)→ ② `javac` template 對真實 NMS 編譯 → ③ `jar uf` 把 template `.class` 當 passive resource 注入 jar(執行期只被讀 bytes、不被載入為類別)。
+流程:① `mvn package`(編出 agent 本體類別 + 把 ASM 這個依賴打包重定位進 jar + 產生 manifest)→ ② `javac` 把 template 對真實 NMS 原始碼編譯(這步**必須用 JDK 25**,因為要編出跟 26.2 伺服器相符的 bytecode 版本;agent 本體類別編譯目標是相容性較廣的 JDK 21 格式,但整個編譯流程統一用 JDK 25 跑,`build.sh` 已內建這個設定)→ ③ `jar uf` 把 template 編出來的 `.class` 檔當成「純資料」塞進 jar(執行期只會被讀取原始 bytes,不會真的被當一個類別載入)。
 
 ---
 
@@ -200,7 +203,7 @@ java -Xms8000M -Xmx8000M \
 開機 log 應出現:
 ```
 [LazyContainer] LazyContainerAgent —— crafted by 廢土貓大 LogoCat · 廢土 · mcfallout.net
-[LazyContainer] spliced 2 fields + 6 methods into BaseContainerBlockEntity
+[LazyContainer] spliced 2 fields + 7 methods into BaseContainerBlockEntity
 [LazyContainer] transformed leaf .../ChestBlockEntity
 [LazyContainer] agent installed (transformer registered) [SHADOW mode]
 ```
@@ -248,8 +251,9 @@ template/.../LazyContainerTemplate.java   對真實 NMS 編譯的延遲邏輯(sp
 tools/scan_containers.py        掃 region 檔找箱子最密的 chunk(找「載入最貴」的地點)
 build.sh  pom.xml  nms-lib/(不入 git)
 FINDINGS.md           反編譯確認的事實 + 設計定案 + 風險分析
-ADVERSARIAL-REVIEW.md 對抗審查報告(8 失效模式)
+ADVERSARIAL-REVIEW.md 對抗審查報告(8 失效模式,12 agent)
+FABLE5-AUDIT.md        Fable 5 二輪對抗審計(49 agent,含記憶體/掉物三問結論)
 TESTING.md            怎麼自己測(自動 round-trip / 手動玩測 / 真實世界副本驗 shadow)
 ```
 
-延伸閱讀:[`FINDINGS.md`](FINDINGS.md)(技術全貌)· [`TESTING.md`](TESTING.md)(自測)· [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md)(審查)。
+延伸閱讀:[`FINDINGS.md`](FINDINGS.md)(技術全貌)· [`TESTING.md`](TESTING.md)(自測)· [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md)(審查)· [`FABLE5-AUDIT.md`](FABLE5-AUDIT.md)(Fable 5 審計)。

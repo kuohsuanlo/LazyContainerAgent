@@ -157,7 +157,12 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                     }
                 }
             }
-            out.put("Items", raw);
+            // 必須寫 raw 的深拷貝:raw 是活體 BE 欄位(lazycontainer$raw),寫回後 pending 不清、raw 保留。
+            // 若直接把本體放進存檔 compound,存檔輸出會與活容器別名(vanilla 每次 fresh encode 天生隔離):
+            // (a) 該 compound 被 Moonrise 交 IO 執行緒非同步序列化,主線程 /data modify 就地改 raw → 撕裂寫檔;
+            // (b) /clone、structure SAVE、CraftBukkit getState() 快照沿 save→load 把同一 ListTag 塞進第二個 BE,
+            //     事後對任一箱 /data modify|remove 會就地改到另一箱(掉物/複製)。copy 樹複製仍遠比 codec encode 便宜。
+            out.put("Items", raw.copy());
             LazyContainerRuntime.onRawSave();
             return true;
         }
