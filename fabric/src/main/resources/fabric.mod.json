@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "${id}",
+  "version": "${version}",
+  "name": "${name}",
+  "description": "箱子物品「延遲反序列化 + 沒碰過就原樣寫回」— 砍掉 chunk 載入/卸載時容器 NBT 解包/重打包的白工。LazyContainerAgent (Paper) 的 Fabric 移植版。",
+  "authors": [
+    "kuohsuanlo (廢土貓大 LogoCat)"
+  ],
+  "contact": {
+    "sources": "https://github.com/kuohsuanlo/LazyContainerAgent"
+  },
+  "license": "All Rights Reserved",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "io.github.kuohsuanlo.lazycontainer.LazyContainerMod"
+    ]
+  },
+  "mixins": [
+    "lazycontainer.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.16",
+    "minecraft": "${minecraft}"
+  }
+}
