@@ -132,7 +132,8 @@ public final class LazyContainerLogic {
         reIn.put("Items", raw);
         int size = ((BaseContainerBlockEntity) be).getContainerSize();
         NonNullList<ItemStack> tmp = NonNullList.withSize(size, ItemStack.EMPTY);
-        ContainerHelper.loadAllItems(TagValueInput.createGlobal(ProblemReporter.DISCARDING, reIn), tmp);
+        ContainerHelper.loadAllItems(
+                TagValueInput.create(ProblemReporter.DISCARDING, be.getLevel().registryAccess(), reIn), tmp);
         TagValueOutput eagerOut = TagValueOutput.createWithContext(
                 ProblemReporter.DISCARDING, be.getLevel().registryAccess());
         if (allowEmpty) {
@@ -154,9 +155,14 @@ public final class LazyContainerLogic {
             return;
         }
         try {
+            BlockEntity be = (BlockEntity) st;
+            if (be.getLevel() == null) {
+                // 理論上不可達:vanilla 在 BE 進世界前不會存取容器內容。拋出 → catch 還原 pending/raw,之後重試
+                throw new IllegalStateException("cannot materialize container items before level is set");
+            }
             CompoundTag tmp = new CompoundTag();
             tmp.put("Items", raw);
-            ValueInput vi = TagValueInput.createGlobal(ProblemReporter.DISCARDING, tmp);
+            ValueInput vi = TagValueInput.create(ProblemReporter.DISCARDING, be.getLevel().registryAccess(), tmp);
             ContainerHelper.loadAllItems(vi, st.lazycontainer$items());  // 依 slot set,冪等 → 失敗可安全重試
             st.lazycontainer$setRaw(null);                               // 僅「成功物化後」才作廢 raw
             LazyContainerRuntime.onEnsure();
