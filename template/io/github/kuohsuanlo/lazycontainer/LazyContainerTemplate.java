@@ -424,11 +424,30 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
      */
     public void lazycontainer$buildSummary() {
         LazyContainerRuntime.onSummaryBuild();
-        Tag raw = this.lazycontainer$raw;
-        int size = this.getContainerSize();
-        if (!(raw instanceof ListTag) || size <= 0 || size > 32) {
+        long packed = lazycontainer$computeSummary(this.lazycontainer$raw, this.getContainerSize());
+        if (packed == LAZYCONTAINER$SUMMARY_GIVEUP) {
             this.lazycontainer$sumState = 2;
             return;
+        }
+        this.lazycontainer$sumBits = (int) (packed >>> 32);
+        this.lazycontainer$sumFullTri = ((int) (packed & 0xFFFFFFFFL)) - 1;
+        this.lazycontainer$sumState = 1;
+    }
+
+    /** {@link #lazycontainer$computeSummary} 的「無法摘要」哨兵值。 */
+    public static final long LAZYCONTAINER$SUMMARY_GIVEUP = Long.MIN_VALUE;
+
+    /**
+     * 摘要演算法本體,寫成<b>純函式</b>(不碰 this、不碰計數器)——如此才能用純 JUnit 直接對它做
+     * 差分測試(餵同一份 raw 給它與真 {@code ContainerHelper.loadAllItems},比對結論),
+     * 不必啟一台 Minecraft server。
+     *
+     * @return 打包值:高 32 位 = 佔用 bitmap、低 32 位 = 滿判定三態 +1(0/1/2 對應 -1/0/1);
+     *         整份無法摘要時回 {@link #LAZYCONTAINER$SUMMARY_GIVEUP}。
+     */
+    public static long lazycontainer$computeSummary(Tag raw, int size) {
+        if (!(raw instanceof ListTag) || size <= 0 || size > 32) {
+            return LAZYCONTAINER$SUMMARY_GIVEUP;
         }
         ListTag list = (ListTag) raw;
         int hasBits = 0;
@@ -442,15 +461,17 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
             CompoundTag t = (CompoundTag) e;
             Tag slotTag = t.get("Slot");
             int slot;
-            if (slotTag == null) {
-                slot = 0;                                            // optionalAlwaysPresentFieldOf 預設 0
-            } else if (slotTag instanceof NumericTag) {
+            if (slotTag instanceof NumericTag) {
                 // 必須用 box():vanilla 是 NbtOps.getNumberValue → Tag.asNumber() → box() → Codec.BYTE 的
                 // Number.byteValue()(java.lang.Double/Float = 向零截斷)。NumericTag.byteValue() 對
                 // Double/FloatTag 是 Mth.floor,負小數會與 vanilla 差 1 格 ⟹ 摘要漏標佔用 ⟹ 假「證明為空」。
                 slot = ((NumericTag) slotTag).box().byteValue() & 0xFF;
             } else {
-                continue;                                            // Codec.BYTE 必失敗 ⟹ 不落格
+                // 缺欄位、或欄位存在但不是數值(字串/清單/compound/位元組陣列…):
+                // Slot 用的是 optionalAlwaysPresentFieldOf(..., 預設 0),欄位解不出時
+                // 一律回退預設值 0、**entry 不會被丟棄**(已用真 codec 實測逐型別確認)。
+                // 早期版本在此 continue,導致 slot 0 被誤標成「證明為空」——差分測試抓到的真 bug。
+                slot = 0;
             }
             if (slot >= size) {
                 continue;                                            // isValidInContainer 丟棄
@@ -541,8 +562,6 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         } else {
             tri = -1;                                                // 佔滿但有無法證明的格 ⟹ 滿與否不知道
         }
-        this.lazycontainer$sumBits = hasBits;
-        this.lazycontainer$sumFullTri = tri;
-        this.lazycontainer$sumState = 1;
+        return ((long) hasBits << 32) | ((long) (tri + 1) & 0xFFFFFFFFL);
     }
 }

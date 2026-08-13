@@ -2,6 +2,7 @@
 target/
 template-out/
 template-classes/
+test-out/
 *.class
 
 # 建置相依(大、含 Mojang/Paper 產物,自行放置)
