@@ -98,7 +98,8 @@ public final class LazyContainerAgentMain {
             if (n.equals("net.minecraft.world.level.block.entity.BaseContainerBlockEntity")
                     || n.equals("net.minecraft.world.level.block.entity.ChestBlockEntity")
                     || n.equals("net.minecraft.world.level.block.entity.BarrelBlockEntity")
-                    || n.equals("net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity")) {
+                    || n.equals("net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity")
+                    || n.equals("net.minecraft.world.level.block.entity.HopperBlockEntity")) {
                 try {
                     inst.retransformClasses(c);
                 } catch (Throwable t) {

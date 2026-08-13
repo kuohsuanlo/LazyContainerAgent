@@ -39,6 +39,30 @@ public final class LazyContainerRuntime {
     /** 良性:raw 與 eager 只是 Items 清單順序不同、物品與槽位完全相同(已安全寫 raw,不算 mismatch)。 */
     public static final AtomicLong benignReorder = new AtomicLong();
 
+    /**
+     * {@code -Dlazycontainer.summary=false} 單獨關掉「摘要(ensure 快取)」,保留延遲解碼本體。
+     * <p>獨立 kill switch:本 agent 已在 production,萬一摘要在真實地圖上冒出行為差異,
+     * 服主可只關這一項、不必整包回滾掉已驗證的延遲解碼。</p>
+     */
+    private static final boolean SUMMARY = !"false".equalsIgnoreCase(System.getProperty("lazycontainer.summary"));
+
+    /**
+     * 摘要回答了漏斗的「整箱滿不滿」檢查的次數。
+     * <p><b>注意語意</b>:這不等於「省下的解碼次數」——只有答「滿」才真的讓漏斗停手;
+     * 答「不滿」只是省掉一圈掃描,後續 hopperPush 仍可能觸發物化。真正跳過解碼的是 {@link #summarySkip}。
+     * 用 LongAdder:此計數在漏斗 tick 熱路徑上,regionized 平台多執行緒同時累加時避免 CAS 對撞。</p>
+     */
+    public static final java.util.concurrent.atomic.LongAdder summaryFull = new java.util.concurrent.atomic.LongAdder();
+
+    /** 摘要證明「此格為空」而讓漏斗直接跳過該格的次數(真正跳過整箱解碼的那條路徑)。 */
+    public static final java.util.concurrent.atomic.LongAdder summarySkip = new java.util.concurrent.atomic.LongAdder();
+
+    /** 摘要建構「嘗試」次數(在入口計數;每個 pending 容器每次載入至多一次)。 */
+    public static final java.util.concurrent.atomic.LongAdder summaryBuild = new java.util.concurrent.atomic.LongAdder();
+
+    /** shadow 覆核抓到「摘要答案與真實 items 不符」的次數。<b>必須恆為 0</b>;>0 已自動棄答(退回原版路徑)。 */
+    public static final java.util.concurrent.atomic.LongAdder summaryMismatch = new java.util.concurrent.atomic.LongAdder();
+
     public static boolean shadow() {
         return SHADOW;
     }
@@ -65,6 +89,33 @@ public final class LazyContainerRuntime {
 
     public static void onShadowMismatch() {
         shadowMismatch.incrementAndGet();
+    }
+
+    public static boolean summary() {
+        return SUMMARY;
+    }
+
+    public static void onSummaryFull() {
+        summaryFull.increment();
+    }
+
+    public static void onSummarySkip() {
+        summarySkip.increment();
+    }
+
+    public static void onSummaryBuild() {
+        summaryBuild.increment();
+    }
+
+    private static final java.util.concurrent.atomic.AtomicInteger summaryLogN = new java.util.concurrent.atomic.AtomicInteger();
+
+    /** shadow 覆核不符:計數 + 前 30 次印出細節(之後只累加,避免洗版)。呼叫端已改為棄答。 */
+    public static void onSummaryMismatch(String detail) {
+        summaryMismatch.increment();
+        if (summaryLogN.incrementAndGet() <= 30) {
+            System.err.println("[LazyContainer] SUMMARY mismatch — " + detail
+                    + " — falling back to vanilla path (safe)");
+        }
     }
 
     private static final java.util.concurrent.atomic.AtomicInteger benignLogN = new java.util.concurrent.atomic.AtomicInteger();
@@ -116,6 +167,10 @@ public final class LazyContainerRuntime {
                 + " ensure=" + ensure.get()
                 + " rawSave=" + rawSave.get()
                 + " eagerLoad=" + eagerLoad.get()
+                + " summaryFull=" + summaryFull.sum()
+                + " summarySkip=" + summarySkip.sum()
+                + " summaryBuild=" + summaryBuild.sum()
+                + " summaryMismatch=" + summaryMismatch.sum()
                 + " shadowMismatch=" + shadowMismatch.get()
                 + " benignReorder=" + benignReorder.get();
     }

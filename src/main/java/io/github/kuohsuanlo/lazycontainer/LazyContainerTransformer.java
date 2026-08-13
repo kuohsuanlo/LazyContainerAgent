@@ -27,6 +27,9 @@ import org.objectweb.asm.tree.MethodNode;
  *   <li><b>Chest/Barrel/ShulkerBox</b>:(1) 在 {@code getItems()/getContents()} 入口插
  *       ensure-guard、{@code setItems()} 入口清旗標;(2) 把 load/save 內的
  *       {@code ContainerHelper.loadAllItems/saveAllItems} 呼叫 redirect 成 base 的 lazy 方法。</li>
+ *   <li><b>HopperBlockEntity</b>:在 {@code isFullContainer}/{@code tryTakeInItemFromSlot} 入口插
+ *       「先問摘要」(ensure 快取):pending 容器的滿/空檢查可由 raw NBT 摘要直接回答,免整箱解碼;
+ *       答不出就照走原路,行為與 vanilla 一致。</li>
  * </ul>
  *
  * <p><b>安全:</b>base 是 leaf 的 superclass,必先載入並 splice;splice 成功才把
@@ -41,16 +44,24 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
     static final String CHEST = P + "ChestBlockEntity";
     static final String BARREL = P + "BarrelBlockEntity";
     static final String SHULKER = P + "ShulkerBoxBlockEntity";
+    static final String HOPPER = P + "HopperBlockEntity";
 
     static final String CH = "net/minecraft/world/ContainerHelper";
     static final String NNL = "net/minecraft/core/NonNullList";
     static final String VIN = "net/minecraft/world/level/storage/ValueInput";
     static final String VOUT = "net/minecraft/world/level/storage/ValueOutput";
     static final String TAG = "Lnet/minecraft/nbt/Tag;";
+    static final String CONTAINER = "net/minecraft/world/Container";
 
     static final String D_LOAD = "(L" + VIN + ";L" + NNL + ";)V";   // loadAllItems / lazycontainer$load
     static final String D_SAVE2 = "(L" + VOUT + ";L" + NNL + ";)V"; // saveAllItems(2) / lazycontainer$save(NoEmpty)
     static final String D_SAVE3 = "(L" + VOUT + ";L" + NNL + ";Z)V"; // saveAllItems(3)
+
+    // ── 摘要(ensure 快取)hopper hook:方法簽章比對必須一字不差(Paper 26.2 與 Folia 系同形,已核對)──
+    static final String D_ISFULL = "(L" + CONTAINER + ";Lnet/minecraft/core/Direction;)Z";               // isFullContainer
+    static final String D_TRYTAKE = "(L" + P + "Hopper;L" + CONTAINER + ";ILnet/minecraft/core/Direction;Lnet/minecraft/world/level/Level;)Z"; // tryTakeInItemFromSlot
+    static final String D_FULLSTATE = "(L" + CONTAINER + ";)I";     // lazycontainer$containerFullState
+    static final String D_SLOTEMPTY = "(L" + CONTAINER + ";I)Z";    // lazycontainer$slotProvenEmpty
 
     static final String TEMPLATE = "io/github/kuohsuanlo/lazycontainer/LazyContainerTemplate";
     static final String TEMPLATE_RES = "/io/github/kuohsuanlo/lazycontainer/LazyContainerTemplate.class";
@@ -77,6 +88,14 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
                     return null;
                 }
                 return transformLeaf(classfileBuffer, className);
+            }
+            if (HOPPER.equals(className)) {
+                if (!LazyContainerRuntime.injected) {
+                    // hook 會呼叫 base 的 lazycontainer$ 靜態方法;base 沒 splice 就不動 hopper(退回 vanilla,只是少了優化)
+                    System.err.println("[LazyContainer] base not spliced; skip hopper hook");
+                    return null;
+                }
+                return transformHopper(classfileBuffer);
             }
         } catch (Throwable t) {
             System.err.println("[LazyContainer] transform failed for " + className + " — leaving vanilla: " + t);
@@ -172,6 +191,89 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
         cr.accept(cv, 0);
         System.out.println("[LazyContainer] transformed leaf " + className);
         return cw.toByteArray();
+    }
+
+    // ───────────────────────────── hopper hook(ensure 快取)─────────────────────────────
+
+    /**
+     * 在 HopperBlockEntity 的兩個靜態檢查方法入口插「先問摘要」:
+     * <ul>
+     *   <li>{@code isFullContainer(Container,Direction)}:{@code int r = BCE.lazycontainer$containerFullState(c);
+     *       if (r >= 0) return r != 0;}(r 恆為 -1/0/1,0/1 可直接當 boolean 回傳)</li>
+     *   <li>{@code tryTakeInItemFromSlot(Hopper,Container,int,Direction,Level)}:
+     *       {@code if (BCE.lazycontainer$slotProvenEmpty(c, slot)) return false;}</li>
+     * </ul>
+     * 摘要答不出(-1/false)⟹ 原方法照舊執行,行為與 vanilla 完全一致。
+     * 名稱+descriptor 一字不差才會插;整類掃完一個都沒中(fork 改了形狀)⟹ 原樣返回、印警告。
+     */
+    private byte[] transformHopper(byte[] buffer) {
+        ClassReader cr = new ClassReader(buffer);
+        ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
+        final int[] hooked = {0};
+        ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String desc,
+                                             String sig, String[] exceptions) {
+                MethodVisitor mv = super.visitMethod(access, name, desc, sig, exceptions);
+                if ("isFullContainer".equals(name) && D_ISFULL.equals(desc)) {
+                    hooked[0]++;
+                    return new HopperHookVisitor(mv, HOOK_FULL);
+                }
+                if ("tryTakeInItemFromSlot".equals(name) && D_TRYTAKE.equals(desc)) {
+                    hooked[0]++;
+                    return new HopperHookVisitor(mv, HOOK_SLOT);
+                }
+                return mv;
+            }
+        };
+        cr.accept(cv, 0);
+        if (hooked[0] == 0) {
+            System.err.println("[LazyContainer] hopper hook: no matching method (fork changed shape?) — leaving vanilla");
+            return null;
+        }
+        System.out.println("[LazyContainer] hooked " + hooked[0] + " hopper check(s) (summary fast-path)");
+        return cw.toByteArray();
+    }
+
+    private static final int HOOK_FULL = 1;
+    private static final int HOOK_SLOT = 2;
+
+    /** 方法入口插摘要查詢;兩個目標方法皆為 static,locals 僅參數,frame 用 F_SAME/F_SAME1 相對入口。 */
+    private static final class HopperHookVisitor extends MethodVisitor {
+        private final int kind;
+
+        HopperHookVisitor(MethodVisitor mv, int kind) {
+            super(Opcodes.ASM9, mv);
+            this.kind = kind;
+        }
+
+        @Override
+        public void visitCode() {
+            super.visitCode();
+            if (kind == HOOK_FULL) {
+                // args: 0=container, 1=direction
+                Label unknown = new Label();
+                super.visitVarInsn(Opcodes.ALOAD, 0);
+                super.visitMethodInsn(Opcodes.INVOKESTATIC, BASE, "lazycontainer$containerFullState", D_FULLSTATE, false);
+                super.visitInsn(Opcodes.DUP);
+                super.visitJumpInsn(Opcodes.IFLT, unknown);
+                super.visitInsn(Opcodes.IRETURN);            // r∈{0,1} 直接作為 boolean 回傳
+                super.visitLabel(unknown);
+                super.visitFrame(Opcodes.F_SAME1, 0, null, 1, new Object[]{Opcodes.INTEGER});
+                super.visitInsn(Opcodes.POP);                // 丟掉 -1,落回原方法
+            } else { // HOOK_SLOT
+                // args: 0=hopper, 1=container, 2=slot(int), 3=direction, 4=level
+                Label cont = new Label();
+                super.visitVarInsn(Opcodes.ALOAD, 1);
+                super.visitVarInsn(Opcodes.ILOAD, 2);
+                super.visitMethodInsn(Opcodes.INVOKESTATIC, BASE, "lazycontainer$slotProvenEmpty", D_SLOTEMPTY, false);
+                super.visitJumpInsn(Opcodes.IFEQ, cont);
+                super.visitInsn(Opcodes.ICONST_0);
+                super.visitInsn(Opcodes.IRETURN);            // 此格證明為空 → 與 vanilla 對空格的結果相同:false
+                super.visitLabel(cont);
+                super.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
+            }
+        }
     }
 
     private static final int GUARD_NONE = 0;

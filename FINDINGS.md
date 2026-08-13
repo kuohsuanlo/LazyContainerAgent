@@ -35,9 +35,24 @@ size 與內容是否物化無關,**不可守**(否則查 size 也會強制物化
 - `BlockEntity.saveWithoutMetadata`(行154)**只呼 `saveAdditional` + 存 `this.components`**(一般容器為 EMPTY),**不呼 `collectImplicitComponents`** → 例行卸載存檔完全不碰 `getItems()` → pending 維持 → 走 raw 回寫。
 - 重建解析用 `ProblemReporter.DISCARDING`(public no-op〔呼叫了但什麼都不做〕單例)+ `TagValueInput.createGlobal`。
 
-### 1.5 loot table(戰利品表,例如地牢箱針對玩家生成隨機戰利品的機制)與 lazy 互斥(無交互)
-leaf load:`if(!tryLoadLootTable(input)) loadAllItems(...)`。loot 箱 → tryLoadLootTable 回 true → 永不進 lazy 路徑。
-一般儲存箱 → 進 lazy。兩者不重疊。`RandomizableContainerBlockEntity`(所有「可能含隨機戰利品」容器的共同基底類別,loot table 邏輯就實作在這裡)的 unpackLootTable accessor 守 index==0(第一次有人查某個格子時才觸發生成戰利品)是 loot 機制,與 lazy 正交(彼此獨立、互不影響)(我的 guard〔攔截檢查點〕在 `getItems()`,每個 index 都觸發)。
+### 1.5 loot table(戰利品表,例如地牢箱針對玩家生成隨機戰利品的機制)與 lazy 的關係
+
+> ⚠️ **本節原本的結論「loot 箱永不進 lazy 路徑、兩者互斥」在 Paper 上是錯的**,已於 2026-08-14 由
+> Fable 5 二輪對抗審計推翻並實機證實。錯誤來源:當時只讀了 vanilla 語意,沒有讀 Paper 的 LootTable API patch。
+
+**原版(vanilla)語意**:leaf load 是 `if(!tryLoadLootTable(input)) loadAllItems(...)`,loot 箱的
+`tryLoadLootTable` 回 true → 跳過 `loadAllItems` → 不進 lazy 路徑。
+
+**Paper 實際語意(權威,26.2 已核對)**:Paper 的 LootTable API 把 `RandomizableContainer.tryLoadLootTable`
+改成回傳 `lootTable != null && this.lootableData() == null`,而 `RandomizableContainerBlockEntity.lootableData`
+是欄位初始化的 `new PaperLootableInventoryData()`、**恆非 null** ⟹ **`tryLoadLootTable` 在 Paper 上恆回 false**
+⟹ **loot 箱同樣會走 `loadAllItems`(被 redirect)、同樣變成 pending**,其 raw 是一份「空的 Items 清單」
+(存檔時 `trySaveLootTable` 同理回 false,於是 `LootTable` 與 `Items: []` 會同時寫進 NBT——實機 dump 已證實)。
+
+**因此的實務後果**:任何「以 raw 判斷容器是否為空」的優化,都必須額外排除「未開封的 loot 容器」,
+否則會把它誤判成空容器,壓制掉 `RandomizableContainerBlockEntity.getItem(0)` 內的 `unpackLootTable`
+——漏斗將永遠抽不出未開封的戰利品箱(靜默行為回歸)。刀一(ensure 快取)即以
+`lazycontainer$lootPending()`(`getLootTable() != null` 就棄答)守住這點,並有差分實機驗證。
 
 ### 1.6 Shulker 三點不同
 欄位名 `itemStacks`(非 items);`saveAllItems(out, itemStacks, false)` **allowEmpty=false 三參數**;load 在 `loadFromTag`(非 loadAdditional)。

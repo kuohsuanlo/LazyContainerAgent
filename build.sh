@@ -35,7 +35,8 @@ echo "== 4. verify =="
 echo "-- manifest --"
 unzip -p "$JAR" META-INF/MANIFEST.MF | grep -E 'Premain|Agent-Class|Retransform|Redefine' || true
 echo "-- key entries --"
-unzip -l "$JAR" | grep -E 'lazycontainer/(LazyContainer(Agent|Runtime|Transformer|Template)|asm/)' | head -20
+# head 會提早關管線讓 unzip 吃 SIGPIPE,配 pipefail 會把整個 build 判死 → 用 awk 截斷代替 head
+unzip -l "$JAR" | awk '/lazycontainer\/(LazyContainer(Agent|Runtime|Transformer|Template)|asm\/)/ && ++n<=20'
 echo "-- relocated ASM present? --"
 unzip -l "$JAR" | grep -c 'io/github/kuohsuanlo/lazycontainer/asm/' || true
 echo "DONE: $(readlink -f "$JAR")"
