@@ -55,3 +55,21 @@ cd .lctest && bash play.sh /tmp/realworld-copy
 **回滾**:拔掉那段旗標重啟即回 100% vanilla,不需任何資料遷移(磁碟格式從未改變)。
 
 > ⚠️ 版本綁 1.21.11/Java21。版本不符會在開機/第一次載箱子時**大聲報錯**(VerifyError/NoSuchMethod),不會靜默毀資料,但別硬上。
+
+## 6) 用真 client bot 測「玩家開箱」這條路徑
+
+`tools/openchest-bot.js` 是一支最小的協定層 bot,用來驗證「玩家開啟容器 GUI」會不會正確物化
+延遲載入的容器,以及雙箱(左右兩半合起來的 54 格)的槽位映射對不對——這兩件事沒有真 client 測不到。
+
+```bash
+npm install minecraft-protocol          # 需要 node 18+
+node tools/openchest-bot.js <host> <port> <x> <y> <z> "3:emerald:3,26:iron_ingot:7,27:diamond:5"
+```
+最後一個參數是「期望的視窗槽位:物品:數量」清單;bot 會印出實際讀到的內容並給 `BOT-VERDICT PASS/FAIL`。
+
+**兩個前提**(踩過的坑,寫下來免得重踩):
+- **伺服器要裝 ViaVersion**。`minecraft-protocol` 目前最新只到協定 `26.1`,直連 26.2 會被伺服器以
+  「版本不符」擋掉;裝了 ViaVersion 之後宣稱 `26.1` 就能連(mineflayer 則完全走不通,它的
+  `prismarine-chunk` 沒有對應實作)。
+- **bot 出生點通常離目標很遠**,超出互動距離時伺服器會安靜地忽略右鍵。bot 會每 2 秒重試一次,
+  你只要在旁邊用 console `tp <botName> <x> <y> <z>` 把它送過去即可。

@@ -167,10 +167,14 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         if (canWriteRaw && output instanceof TagValueOutput) {
             CompoundTag out = ((TagValueOutput) output).buildResult();
             if (LazyContainerRuntime.shadow()) {
+                // shadow 是「純觀測」模式:偵測並回報 raw 與 vanilla 重新編碼的差異,但**絕不改寫玩家資料**。
+                // 設計原則(服主要求):寫回磁碟的必須逐位元組等於讀進來的那份,不論兩者語意是否等價。
+                // 早期版本在 mismatch 時改寫 eager(vanilla 正規形式),那會把磁碟上既有的寫法
+                // 正規化掉——例如 codec 對預設值 count:1 會省略不寫,而舊資料明確寫了它
+                // (s3 商場 37 萬個 entry 中就有 291,990 個),等於無聲改動玩家資料,已移除該行為。
                 Tag eager = this.lazycontainer$eagerItems(raw, allowEmpty);
                 if (!Objects.equals(eager, raw)) {
                     if (this.lazycontainer$sameItems(raw, eager)) {
-                        // 只是 Items 清單順序不同、物品與槽位完全相同 → 良性:仍偵測回報(標 NO IMPACT)、落到下方寫 raw(安全)
                         LazyContainerRuntime.onBenignReorder(String.valueOf(this.getBlockPos()),
                                 String.valueOf(raw), String.valueOf(eager));
                     } else {
@@ -178,13 +182,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                         LazyContainerRuntime.dumpMismatch(String.valueOf(this.getBlockPos()),
                                 String.valueOf(raw), eager == null ? "<discard>" : String.valueOf(eager));
                         System.err.println("[LazyContainer] SHADOW mismatch @ " + this.getBlockPos()
-                                + " — writing eager (safe). rawType=" + raw.getClass().getSimpleName());
-                        if (eager != null) {
-                            out.put("Items", eager);
-                        } else {
-                            out.remove("Items");
-                        }
-                        return true;
+                                + " — reporting only, raw kept verbatim. rawType=" + raw.getClass().getSimpleName());
                     }
                 }
             }
