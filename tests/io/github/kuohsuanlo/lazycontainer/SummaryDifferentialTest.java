@@ -1,6 +1,8 @@
 package io.github.kuohsuanlo.lazycontainer;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
@@ -319,6 +321,66 @@ class SummaryDifferentialTest {
         assertEquals(LazyContainerTemplate.LAZYCONTAINER$SUMMARY_GIVEUP,
                 LazyContainerTemplate.lazycontainer$computeSummary(StringTag.valueOf("not a list"), 27),
                 "raw 非 ListTag 必須棄答");
+    }
+
+    // ───────────────────────── raw bytes 往返(方案 A′ 的資料不變鐵則)─────────────────────────
+
+    @Test
+    @DisplayName("raw bytes 往返:decode(encode(t))≡t、encode(decode(b)) 逐位元組=b、null 進出")
+    void rawBytesRoundTrip() throws Exception {
+        Random r = new Random(5566L);
+        for (int iter = 0; iter < 3000; iter++) {
+            ListTag items = new ListTag();
+            int n = r.nextInt(30);
+            for (int i = 0; i < n; i++) {
+                items.add(randomEntry(r));
+            }
+            byte[] b = LazyContainerTemplate.lazycontainer$encodeRaw(items);
+            Tag back = LazyContainerTemplate.lazycontainer$decodeRaw(b);
+            assertEquals(items, back, "decode(encode(t)) 必須等於 t(掉物=資料毀損)");
+            byte[] b2 = LazyContainerTemplate.lazycontainer$encodeRaw(back);
+            assertArrayEquals(b, b2, "encode(decode(b)) 必須逐位元組等於 b(存檔輸出穩定性)");
+        }
+        assertNull(LazyContainerTemplate.lazycontainer$encodeRaw(null));
+        assertNull(LazyContainerTemplate.lazycontainer$decodeRaw(null));
+    }
+
+    @Test
+    @DisplayName("raw bytes 往返:深巢 shulker-in-chest(材料站形態)+ 明確 count:1 保留")
+    void rawBytesRoundTripNested() throws Exception {
+        // 模擬 s18 材料站的資料形態:箱子的 Items 裡是界伏盒,界伏盒的 container component 裡還有物品,
+        // 且內層有「明確寫出的 count:1」(codec 正規化會省略它——往返絕不能弄掉)。
+        ListTag inner = new ListTag();
+        for (int i = 0; i < 27; i++) {
+            CompoundTag slotEntry = new CompoundTag();
+            slotEntry.putInt("slot", i);
+            CompoundTag item = new CompoundTag();
+            item.putString("id", "minecraft:diamond");
+            item.putInt("count", 1);            // 明確預設值
+            slotEntry.put("item", item);
+            inner.add(slotEntry);
+        }
+        ListTag items = new ListTag();
+        for (int s = 0; s < 27; s++) {
+            CompoundTag box = new CompoundTag();
+            box.putByte("Slot", (byte) s);
+            box.putString("id", "minecraft:shulker_box");
+            box.putInt("count", 1);
+            CompoundTag comps = new CompoundTag();
+            comps.put("minecraft:container", inner.copy());
+            box.put("components", comps);
+            items.add(box);
+        }
+        byte[] b = LazyContainerTemplate.lazycontainer$encodeRaw(items);
+        Tag back = LazyContainerTemplate.lazycontainer$decodeRaw(b);
+        assertEquals(items, back, "深巢結構往返必須恆等");
+        assertArrayEquals(b, LazyContainerTemplate.lazycontainer$encodeRaw(back), "深巢 byte 穩定");
+        // 內層 count:1 逐一還在
+        ListTag backL = (ListTag) back;
+        CompoundTag c0 = (CompoundTag) backL.get(0);
+        ListTag innerBack = (ListTag) ((CompoundTag) c0.get("components")).get("minecraft:container");
+        CompoundTag innerItem = (CompoundTag) ((CompoundTag) innerBack.get(0)).get("item");
+        assertTrue(innerItem.get("count") != null, "內層明確 count:1 不得被往返弄掉");
     }
 
     // ───────────────────────── 隨機模糊測試 ─────────────────────────

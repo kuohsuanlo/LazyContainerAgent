@@ -1,11 +1,17 @@
 package io.github.kuohsuanlo.lazycontainer;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.util.Objects;
 import net.minecraft.core.NonNullList;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.NbtAccounter;
+import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.NumericTag;
 import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.Tag;
@@ -43,12 +49,18 @@ import net.minecraft.world.level.storage.ValueOutput;
  * <h3>不變式(資料安全鐵律)</h3>
  * <ul>
  *   <li>{@code lazycontainer$pending == true} ⟺ items 清單「尚未物化」(仍是載入時建立的全空清單),
- *       真正內容以未解碼的原始 "Items" {@link Tag} 暫存在 {@code lazycontainer$raw}。</li>
+ *       真正內容以 <b>NBT 二進位序列化的 {@code byte[]}</b> 暫存在 {@code lazycontainer$raw}
+ *       (原本是 {@link Tag} 樹;s18 材料站 OOM 事故證明 26 MB 的 Items 樹會佔 80–260 MB heap,
+ *       改存 bytes 後滯留量就是 bytes 本身,見面板 #160 方案 A′)。</li>
  *   <li>一旦任何存取點呼叫 {@code getItems()/getContents()},entry-guard 會先呼叫
  *       {@link #lazycontainer$ensure()} 把 raw 解碼進清單,並把 pending 設為 false、raw 設為 null
  *       (raw 立即作廢,永不再被寫回)。</li>
- *   <li>存檔時:pending 且 raw!=null 且 output 是 TagValueOutput ⟹ 逐位元組把 raw 寫回(跳過 encode);
- *       否則 ⟹ 先物化再正常 encode。最壞只是少省一次,絕不掉資料。</li>
+ *   <li>存檔時:pending 且 raw!=null 且 output 是 TagValueOutput ⟹ 把 raw 解回 Tag 塞進 output
+ *       (每次都是全新的私有樹,結構性杜絕「存檔輸出與活容器共用同一棵樹」的別名家族);
+ *       寫進磁碟的位元組與讀進來的等價(NBT 二進位往返保序)。否則 ⟹ 先物化再正常 encode。
+ *       最壞只是少省一次,絕不掉資料。</li>
+ *   <li>摘要(sumState/sumBits/sumFullTri)在載入當下「趁樹還在手上」eager 建好——
+ *       漏斗的十億級查詢永遠不需要 parse bytes。</li>
  * </ul>
  */
 public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
@@ -56,8 +68,17 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
     /** true = items 尚未物化,內容在 {@link #lazycontainer$raw}。預設 false ⟹ 非目標容器行為完全不變。 */
     public boolean lazycontainer$pending;
 
-    /** 載入時暫存的未解碼原始 "Items" ListTag(可能為 null = 原本就沒有 Items)。 */
-    public Tag lazycontainer$raw;
+    /**
+     * 載入時暫存的原始 "Items" tag,以 <b>NBT 二進位</b>({@code NbtIo.writeAnyTag} 框架:1 byte 型別 + payload)
+     * 序列化保存;null = 原本就沒有 Items。
+     * <p>為什麼是 {@code byte[]} 不是 {@link Tag} 樹:NBT 物件樹(每層一個 Object2ObjectOpenHashMap +
+     * entry 陣列 + String key + tag 物件頭)是原始 bytes 的 3–10 倍;材料站那種單 chunk 26 MB Items 的
+     * 場景,樹形滯留直接灌爆 heap(s18 2026-08-14 OOM,面板 #160)。bytes 形式的滯留量就是資料本身。</p>
+     * <p>為什麼不能連 bytes 都省(直接引用磁碟 buffer):agent 掛在 ValueInput 層,拿到的已是解析完的樹,
+     * 上游的壓縮串流早就不在了;而 {@code Tag} 是 sealed interface,也做不出 byte-backed 的假 Tag
+     * 讓存檔直接吐 bytes——那兩條都是方案 B(改核心)的領域。</p>
+     */
+    public byte[] lazycontainer$raw;
 
     // ── 摘要(ensure 快取):讓漏斗的滿/空檢查不必觸發整箱解碼 ──
     // 不變式:摘要只能在「答案可證明與 vanilla 解碼後行為完全一致」時給出定論;
@@ -83,20 +104,68 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
 
     /**
      * 取代 {@code ContainerHelper.loadAllItems(input, items)}。
-     * 若 input 是 TagValueInput(chunk 載入恆是),擷取未解碼的 "Items" tag 暫存、標記 pending,
-     * <b>跳過昂貴的 decode</b>;否則退回 eager(安全)。
+     * 若 input 是 TagValueInput(chunk 載入恆是),把 "Items" tag 序列化成 bytes 暫存、標記 pending,
+     * <b>跳過昂貴的物品 decode</b>;否則退回 eager(安全)。
+     * <p>兩件事都趁「樹還在手上」做完:(1) encode 成 bytes(之後 chunk 樹整棵可被 GC,
+     * 滯留只剩 bytes);(2) eager 建摘要(漏斗查詢永不需要 parse bytes)。
+     * encode 有任何意外 ⟹ 整個退回 eager 載入,行為=vanilla。</p>
      */
     public void lazycontainer$load(ValueInput input, NonNullList<ItemStack> items) {
         this.lazycontainer$sumState = 0;    // 換了新 raw,舊摘要作廢
         if (input instanceof TagValueInput) {
-            this.lazycontainer$raw = ((TagValueInput) input).input.get("Items");
+            Tag itemsTag = ((TagValueInput) input).input.get("Items");
+            byte[] encoded;
+            try {
+                encoded = lazycontainer$encodeRaw(itemsTag);
+            } catch (Throwable t) {
+                // encode 失敗(現實上不可達):退回 eager,行為與 vanilla 完全相同
+                ContainerHelper.loadAllItems(input, items);
+                this.lazycontainer$pending = false;
+                LazyContainerRuntime.onEagerLoad();
+                return;
+            }
+            this.lazycontainer$raw = encoded;
             this.lazycontainer$pending = true;
+            // 摘要 eager 建置:樹此刻還在(免 parse);查詢端不再 lazy build(sumState==0 一律當「不知道」)
+            if (LazyContainerRuntime.summary()) {
+                long packed = lazycontainer$computeSummary(itemsTag, this.getContainerSize());
+                if (packed == LAZYCONTAINER$SUMMARY_GIVEUP) {
+                    this.lazycontainer$sumState = 2;
+                } else {
+                    this.lazycontainer$sumBits = (int) (packed >>> 32);
+                    this.lazycontainer$sumFullTri = ((int) (packed & 0xFFFFFFFFL)) - 1;
+                    this.lazycontainer$sumState = 1;
+                }
+                LazyContainerRuntime.onSummaryBuild();
+            } else {
+                this.lazycontainer$sumState = 2;
+            }
             LazyContainerRuntime.onStash();
             return;
         }
         ContainerHelper.loadAllItems(input, items);
         this.lazycontainer$pending = false;
         LazyContainerRuntime.onEagerLoad();
+    }
+
+    /** Tag → NBT 二進位({@code NbtIo.writeAnyTag} 框架);null 進 null 出。 */
+    public static byte[] lazycontainer$encodeRaw(Tag tag) throws java.io.IOException {
+        if (tag == null) {
+            return null;
+        }
+        ByteArrayOutputStream bos = new ByteArrayOutputStream(256);
+        DataOutputStream dos = new DataOutputStream(bos);
+        NbtIo.writeAnyTag(tag, dos);
+        return bos.toByteArray();
+    }
+
+    /** NBT 二進位 → Tag(與 {@link #lazycontainer$encodeRaw} 嚴格對稱);null 進 null 出。 */
+    public static Tag lazycontainer$decodeRaw(byte[] bytes) throws java.io.IOException {
+        if (bytes == null) {
+            return null;
+        }
+        DataInputStream dis = new DataInputStream(new ByteArrayInputStream(bytes));
+        return NbtIo.readAnyTag(dis, NbtAccounter.unlimitedHeap());
     }
 
     /**
@@ -111,15 +180,20 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
             return;
         }
         this.lazycontainer$pending = false;     // 先清旗標 → 下面 getItems() 不會再 reenter 本方法
-        Tag raw = this.lazycontainer$raw;
-        if (raw != null) {
+        byte[] rawBytes = this.lazycontainer$raw;
+        if (rawBytes != null) {
             try {
+                Tag raw = lazycontainer$decodeRaw(rawBytes);        // bytes → Tag(自家 encode 的往返,失敗即拋)
                 CompoundTag tmp = new CompoundTag();
                 tmp.put("Items", raw);
                 ValueInput vi = TagValueInput.createGlobal(ProblemReporter.DISCARDING, tmp);
                 ContainerHelper.loadAllItems(vi, this.getItems());  // 依 slot set,冪等 → 失敗可安全重試
                 this.lazycontainer$raw = null;                      // 僅「成功物化後」才作廢 raw
                 LazyContainerRuntime.onEnsure();
+            } catch (java.io.IOException io) {
+                // decode 自家 bytes 失敗(現實上不可達):還原 pending、保留 raw,下次重試,絕不靜默丟失
+                this.lazycontainer$pending = true;
+                throw new IllegalStateException("lazycontainer raw decode failed", io);
             } catch (Throwable t) {
                 // 物化失敗(理論上不可達,DISCARDING 吞解碼錯):還原 pending、保留 raw,下次存取重試,絕不靜默丟失
                 this.lazycontainer$pending = true;
@@ -158,47 +232,52 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         if (!this.lazycontainer$pending) {
             return false;
         }
-        Tag raw = this.lazycontainer$raw;
+        byte[] rawBytes = this.lazycontainer$raw;
+        if (rawBytes == null || !(output instanceof TagValueOutput)) {
+            // 沒有 Items 可回寫 / output 型別非預期:物化後讓呼叫端走正常 encode(語意等同 vanilla)
+            this.lazycontainer$ensure();
+            return false;
+        }
+        Tag raw;
+        try {
+            raw = lazycontainer$decodeRaw(rawBytes);    // 每次存檔 parse 一棵**全新的私有樹**(取代舊版的 raw.copy())
+        } catch (java.io.IOException io) {
+            this.lazycontainer$ensure();                // 自家 bytes 解不開(不可達):退回正常 encode,不掉資料
+            return false;
+        }
         // 只在 raw 為「真正的 ListTag」時走快路徑;且 allowEmpty==false(shulker)遇空清單不可寫 raw
         // (vanilla 對空清單會 discard "Items")。非 ListTag / 空-shulker 一律退回 ensure+正常 save,
         // 對所有輸入(含外部/損毀 NBT)逐位元組對齊 vanilla,且不掉物。
         boolean canWriteRaw = (raw instanceof ListTag)
                 && !(!allowEmpty && ((ListTag) raw).isEmpty());
-        if (canWriteRaw && output instanceof TagValueOutput) {
-            CompoundTag out = ((TagValueOutput) output).buildResult();
-            if (LazyContainerRuntime.shadow()) {
-                // shadow 是「純觀測」模式:偵測並回報 raw 與 vanilla 重新編碼的差異,但**絕不改寫玩家資料**。
-                // 設計原則(服主要求):寫回磁碟的必須逐位元組等於讀進來的那份,不論兩者語意是否等價。
-                // 早期版本在 mismatch 時改寫 eager(vanilla 正規形式),那會把磁碟上既有的寫法
-                // 正規化掉——例如 codec 對預設值 count:1 會省略不寫,而舊資料明確寫了它
-                // (s3 商場 37 萬個 entry 中就有 291,990 個),等於無聲改動玩家資料,已移除該行為。
-                Tag eager = this.lazycontainer$eagerItems(raw, allowEmpty);
-                if (!Objects.equals(eager, raw)) {
-                    if (this.lazycontainer$sameItems(raw, eager)) {
-                        LazyContainerRuntime.onBenignReorder(String.valueOf(this.getBlockPos()),
-                                String.valueOf(raw), String.valueOf(eager));
-                    } else {
-                        LazyContainerRuntime.onShadowMismatch();
-                        LazyContainerRuntime.dumpMismatch(String.valueOf(this.getBlockPos()),
-                                String.valueOf(raw), eager == null ? "<discard>" : String.valueOf(eager));
-                        System.err.println("[LazyContainer] SHADOW mismatch @ " + this.getBlockPos()
-                                + " — reporting only, raw kept verbatim. rawType=" + raw.getClass().getSimpleName());
-                    }
+        if (!canWriteRaw) {
+            this.lazycontainer$ensure();
+            return false;
+        }
+        CompoundTag out = ((TagValueOutput) output).buildResult();
+        if (LazyContainerRuntime.shadow()) {
+            // shadow 是「純觀測」模式:偵測並回報 raw 與 vanilla 重新編碼的差異,但**絕不改寫玩家資料**。
+            // 設計原則(服主要求):寫回磁碟的必須逐位元組等於讀進來的那份,不論兩者語意是否等價。
+            Tag eager = this.lazycontainer$eagerItems(raw, allowEmpty);
+            if (!Objects.equals(eager, raw)) {
+                if (this.lazycontainer$sameItems(raw, eager)) {
+                    LazyContainerRuntime.onBenignReorder(String.valueOf(this.getBlockPos()),
+                            String.valueOf(raw), String.valueOf(eager));
+                } else {
+                    LazyContainerRuntime.onShadowMismatch();
+                    LazyContainerRuntime.dumpMismatch(String.valueOf(this.getBlockPos()),
+                            String.valueOf(raw), eager == null ? "<discard>" : String.valueOf(eager));
+                    System.err.println("[LazyContainer] SHADOW mismatch @ " + this.getBlockPos()
+                            + " — reporting only, raw kept verbatim. rawType=" + raw.getClass().getSimpleName());
                 }
             }
-            // 必須寫 raw 的深拷貝:raw 是活體 BE 欄位(lazycontainer$raw),寫回後 pending 不清、raw 保留。
-            // 若直接把本體放進存檔 compound,存檔輸出會與活容器別名(vanilla 每次 fresh encode 天生隔離):
-            // (a) 該 compound 被 Moonrise 交 IO 執行緒非同步序列化,主線程 /data modify 就地改 raw → 撕裂寫檔;
-            // (b) /clone、structure SAVE、CraftBukkit getState() 快照沿 save→load 把同一 ListTag 塞進第二個 BE,
-            //     事後對任一箱 /data modify|remove 會就地改到另一箱(掉物/複製)。copy 樹複製仍遠比 codec encode 便宜。
-            out.put("Items", raw.copy());
-            LazyContainerRuntime.onRawSave();
-            return true;
         }
-        // raw==null / 非 ListTag / 空清單-shulker / output 非 TagValueOutput:
-        // 物化後讓呼叫端走正常 encode(語意逐位元組等同 vanilla)
-        this.lazycontainer$ensure();
-        return false;
+        // 不再需要 .copy():raw 是本次 parse 出的全新樹,存檔 compound 是它唯一的持有者。
+        // 舊版把「活體 BE 欄位上的樹」放進存檔輸出才有別名家族(/clone、structure、getState、async 寫盤互撞);
+        // bytes 形式下每個消費者天生拿到獨立副本,那一整族問題結構性消失。
+        out.put("Items", raw);
+        LazyContainerRuntime.onRawSave();
+        return true;
     }
 
     /** shadow 用:把 raw 完整 parse→encode 一次,回傳 eager 會寫出的 "Items" tag(可能 null = 被 discard)。 */
@@ -374,15 +453,13 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                 && ((RandomizableContainer) this).getLootTable() != null;
     }
 
-    /** 單箱滿判定三態;非 pending(已物化/非 lazy 容器)或未開封 loot 容器恆回 -1。計數由聚合端負責。 */
+    /**
+     * 單箱滿判定三態;非 pending(已物化/非 lazy 容器)或未開封 loot 容器恆回 -1。計數由聚合端負責。
+     * <p>摘要一律在載入時 eager 建好;{@code sumState==0}(不該發生)直接當「不知道」——
+     * 絕不在查詢路徑 parse bytes(漏斗每 tick 打十億次,一次 26 MB parse 就是一次凍結)。</p>
+     */
     public int lazycontainer$fullState() {
-        if (!this.lazycontainer$pending || this.lazycontainer$lootPending()) {
-            return -1;
-        }
-        if (this.lazycontainer$sumState == 0) {
-            this.lazycontainer$buildSummary();
-        }
-        if (this.lazycontainer$sumState != 1) {
+        if (!this.lazycontainer$pending || this.lazycontainer$sumState != 1 || this.lazycontainer$lootPending()) {
             return -1;
         }
         return this.lazycontainer$sumFullTri;
@@ -390,13 +467,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
 
     /** 單箱單格「證明為空」;非 pending 或未開封 loot 容器恆回 false。計數由聚合端負責。 */
     public boolean lazycontainer$slotEmpty(int slot) {
-        if (!this.lazycontainer$pending || this.lazycontainer$lootPending()) {
-            return false;
-        }
-        if (this.lazycontainer$sumState == 0) {
-            this.lazycontainer$buildSummary();
-        }
-        if (this.lazycontainer$sumState != 1) {
+        if (!this.lazycontainer$pending || this.lazycontainer$sumState != 1 || this.lazycontainer$lootPending()) {
             return false;
         }
         if (slot < 0 || slot >= 32 || slot >= this.getContainerSize()) {
@@ -405,13 +476,17 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         return (this.lazycontainer$sumBits >>> slot & 1) == 0;
     }
 
+    /** {@link #lazycontainer$computeSummary} 的「無法摘要」哨兵值。 */
+    public static final long LAZYCONTAINER$SUMMARY_GIVEUP = Long.MIN_VALUE;
+
     /**
-     * 從 raw(未解碼的 "Items" ListTag)一次掃出摘要。逐 entry 精確重演 vanilla 解碼語意:
+     * 摘要演算法本體,寫成<b>純函式</b>(不碰 this、不碰計數器)——如此才能用純 JUnit 直接對它做
+     * 差分測試(餵同一份 raw 給它與真 {@code ContainerHelper.loadAllItems},比對結論),
+     * 不必啟一台 Minecraft server。逐 entry 精確重演 vanilla 解碼語意:
      * <ul>
-     *   <li>Slot:{@code ExtraCodecs.UNSIGNED_BYTE} + 預設 0 ⟹ 缺欄位=0;任何 NumericTag 依
-     *       {@code Number.byteValue() & 0xFF} 決定落點(與 Codec.BYTE 的數值強轉逐位相同);
-     *       非數值 ⟹ 該 entry 解碼必失敗、不落任何格 ⟹ 忽略。越界(>=size)= vanilla
-     *       {@code isValidInContainer} 丟棄 ⟹ 忽略。</li>
+     *   <li>Slot:{@code ExtraCodecs.UNSIGNED_BYTE} + 預設 0;NumericTag 依 {@code box().byteValue() & 0xFF}
+     *       決定落點(= Codec.BYTE 的數值強轉,向零截斷);<b>非數值或缺欄位一律回退預設 0、entry 不會被丟棄</b>
+     *       (optional 欄位語意,已用真 codec 逐型別實測)。越界(>=size)= isValidInContainer 丟棄。</li>
      *   <li>佔用宣告(bit):slot 只要被任何 entry 指到就標佔用——即使那個 entry 其實會解碼失敗。
      *       「證明為空」只給完全沒有 entry 的格,方向絕對安全。</li>
      *   <li>滿判定:每格以「最後一個指到它的 entry」為準(vanilla {@code items.set} 後寫者勝)。
@@ -419,26 +494,6 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
      *       components 缺席或只含合法的 minecraft:max_stack_size)才算「乾淨」,
      *       乾淨才能參與「全滿=1」的證明;乾淨且 count&lt;max 則可直接證明「不滿=0」。</li>
      * </ul>
-     */
-    public void lazycontainer$buildSummary() {
-        LazyContainerRuntime.onSummaryBuild();
-        long packed = lazycontainer$computeSummary(this.lazycontainer$raw, this.getContainerSize());
-        if (packed == LAZYCONTAINER$SUMMARY_GIVEUP) {
-            this.lazycontainer$sumState = 2;
-            return;
-        }
-        this.lazycontainer$sumBits = (int) (packed >>> 32);
-        this.lazycontainer$sumFullTri = ((int) (packed & 0xFFFFFFFFL)) - 1;
-        this.lazycontainer$sumState = 1;
-    }
-
-    /** {@link #lazycontainer$computeSummary} 的「無法摘要」哨兵值。 */
-    public static final long LAZYCONTAINER$SUMMARY_GIVEUP = Long.MIN_VALUE;
-
-    /**
-     * 摘要演算法本體,寫成<b>純函式</b>(不碰 this、不碰計數器)——如此才能用純 JUnit 直接對它做
-     * 差分測試(餵同一份 raw 給它與真 {@code ContainerHelper.loadAllItems},比對結論),
-     * 不必啟一台 Minecraft server。
      *
      * @return 打包值:高 32 位 = 佔用 bitmap、低 32 位 = 滿判定三態 +1(0/1/2 對應 -1/0/1);
      *         整份無法摘要時回 {@link #LAZYCONTAINER$SUMMARY_GIVEUP}。

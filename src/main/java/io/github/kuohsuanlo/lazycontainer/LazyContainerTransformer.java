@@ -50,7 +50,9 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
     static final String NNL = "net/minecraft/core/NonNullList";
     static final String VIN = "net/minecraft/world/level/storage/ValueInput";
     static final String VOUT = "net/minecraft/world/level/storage/ValueOutput";
-    static final String TAG = "Lnet/minecraft/nbt/Tag;";
+    /** lazycontainer$raw 的欄位描述子。方案 A′ 後是 byte[](原為 Lnet/minecraft/nbt/Tag;)——
+     *  GUARD_CLEAR 的 PUTFIELD 用它,與 template 欄位型別不符會直接 VerifyError。 */
+    static final String RAW_DESC = "[B";
     static final String CONTAINER = "net/minecraft/world/Container";
 
     static final String D_LOAD = "(L" + VIN + ";L" + NNL + ";)V";   // loadAllItems / lazycontainer$load
@@ -322,7 +324,7 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
                 super.visitFieldInsn(Opcodes.PUTFIELD, owner, "lazycontainer$pending", "Z");
                 super.visitVarInsn(Opcodes.ALOAD, 0);
                 super.visitInsn(Opcodes.ACONST_NULL);
-                super.visitFieldInsn(Opcodes.PUTFIELD, owner, "lazycontainer$raw", TAG);
+                super.visitFieldInsn(Opcodes.PUTFIELD, owner, "lazycontainer$raw", RAW_DESC);
             }
         }
     }
