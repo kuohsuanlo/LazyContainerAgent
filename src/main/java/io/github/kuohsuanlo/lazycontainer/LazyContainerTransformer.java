@@ -69,9 +69,36 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
     static final String TEMPLATE_RES = "/io/github/kuohsuanlo/lazycontainer/LazyContainerTemplate.class";
     static final String PREFIX = "lazycontainer$";
 
-    // splice 用:由 template remap 到 BASE 後抽出的成員(首次用到時建立一次)
+    // splice 用:由 template remap 到 BASE 後抽出的成員(premain 時 prepare() 先建好)
     private volatile List<FieldNode> spliceFields;
     private volatile List<MethodNode> spliceMethods;
+
+    /**
+     * premain 時呼叫:預先載入 template 成員,回傳是否就緒。
+     * <p><b>為什麼 leaf/hopper 的閘門必須看「template 就緒」而不是「base 已 splice」</b>:
+     * JVM 定義 leaf 類時,transform 回呼跑在 defineClass <b>之前</b>,而 superclass(base)的載入發生在
+     * defineClass <b>之內</b>——所以 leaf 的 transform 永遠比 base 的先執行。舊閘門
+     * {@code !injected ⟹ skip} 賭的是「總有別的類先去載 base」;EndRod r134 恰好如此,
+     * <b>r149 改了初始化順序,整場 boot 沒人先碰 base ⟹ 三個 leaf 全被跳過 ⟹ agent 靜默失效</b>
+     * (stash=0 但 active=true,2026-08-14 生產實測)。
+     * 正確的不變式是:<b>base 的「定義」保證在 leaf 的「定義完成」之前</b>(superclass 解析),
+     * 因此只要 template 讀得起來、base 的 splice 就必然趕在任何 leaf 程式碼執行之前完成——
+     * leaf 可以無條件改寫,只需確保 template 可用。</p>
+     */
+    // 必須 public:premain 的 AgentMain 在 app loader,本類別由 bootstrap loader 載入,
+    // 同套件名不同 loader=不同 runtime package,package-private 會 IllegalAccessError(整台 server 起不來)。
+    public boolean prepare() {
+        loadSpliceMembers();
+        boolean ready = spliceMethods != null && !spliceMethods.isEmpty();
+        if (!ready) {
+            System.err.println("[LazyContainer] FATAL: template unavailable at premain — agent stays fully inactive");
+        }
+        return ready;
+    }
+
+    private boolean templateReady() {
+        return spliceMethods != null && !spliceMethods.isEmpty();
+    }
 
     @Override
     public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
@@ -84,17 +111,15 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
                 return spliceBase(classfileBuffer);
             }
             if (CHEST.equals(className) || BARREL.equals(className) || SHULKER.equals(className)) {
-                if (!LazyContainerRuntime.injected) {
-                    // base 尚未/未能 splice → 不動 leaf(安全退回 vanilla)
-                    System.err.println("[LazyContainer] base not spliced; skip leaf " + className);
+                if (!templateReady()) {
+                    System.err.println("[LazyContainer] template unavailable; skip leaf " + className);
                     return null;
                 }
                 return transformLeaf(classfileBuffer, className);
             }
             if (HOPPER.equals(className)) {
-                if (!LazyContainerRuntime.injected) {
-                    // hook 會呼叫 base 的 lazycontainer$ 靜態方法;base 沒 splice 就不動 hopper(退回 vanilla,只是少了優化)
-                    System.err.println("[LazyContainer] base not spliced; skip hopper hook");
+                if (!templateReady()) {
+                    System.err.println("[LazyContainer] template unavailable; skip hopper hook");
                     return null;
                 }
                 return transformHopper(classfileBuffer);

@@ -83,8 +83,11 @@ public final class LazyContainerAgentMain {
     }
 
     private static void install(Instrumentation inst) {
-        inst.addTransformer(new LazyContainerTransformer(), true);
-        System.out.println("[LazyContainer] agent installed (transformer registered)"
+        LazyContainerTransformer t = new LazyContainerTransformer();
+        boolean ready = t.prepare();    // premain 就把 template 讀好:leaf/hopper 閘門看的是它,不再賭類載入順序
+        inst.addTransformer(t, true);
+        System.out.println("[LazyContainer] agent installed (transformer registered, template="
+                + (ready ? "ready" : "MISSING") + ")"
                 + (LazyContainerRuntime.shadow() ? " [SHADOW mode]" : ""));
     }
 
