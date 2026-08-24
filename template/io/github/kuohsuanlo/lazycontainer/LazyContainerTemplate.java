@@ -182,15 +182,18 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         this.lazycontainer$pending = false;     // 先清旗標 → 下面 getItems() 不會再 reenter 本方法
         byte[] rawBytes = this.lazycontainer$raw;
         if (rawBytes != null) {
+            // 歸因(#223 未結②)+ 解碼計時(#223 未結①):堆疊要在解碼「之前」抓(之後鏈就沒了),
+            // 耗時要包住真解碼。每容器每次載入至多一次、不在 tick 熱路徑。
+            // 兩者都只在 rawBytes!=null 分支內:raw==null 的 no-op 物化零解碼成本,不計桶也不計時
+            // (否則 Σattr>ensure,冷機谷報表被幽靈數字稀釋)。
+            StackTraceElement[] attrStack = null;
+            long attrT0 = 0L;
             if (LazyContainerRuntime.attribution()) {
                 try {
-                    // 歸因(#223 未結②):真解碼的當下抓一次呼叫堆疊分桶——每容器每次載入至多一次,
-                    // 不在 tick 熱路徑;分類邏輯在 Runtime(可獨立測試),這裡只負責抓 frame。
-                    // 放在 rawBytes!=null 分支內:raw==null 的 no-op 物化(空 shulker 等)零解碼成本,
-                    // 不計桶——否則 Σattr>ensure,冷機谷的 decode 歸因報表會被幽靈數字稀釋(審查 medium)。
-                    LazyContainerRuntime.onEnsureAttributed(new Exception().getStackTrace());
+                    attrStack = new Exception().getStackTrace();
+                    attrT0 = System.nanoTime();
                 } catch (Throwable ignored) {
-                    // 觀測失敗絕不影響物化
+                    attrStack = null;           // 觀測失敗絕不影響物化
                 }
             }
             try {
@@ -201,6 +204,19 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                 ContainerHelper.loadAllItems(vi, this.getItems());  // 依 slot set,冪等 → 失敗可安全重試
                 this.lazycontainer$raw = null;                      // 僅「成功物化後」才作廢 raw
                 LazyContainerRuntime.onEnsure();
+                if (attrStack != null) {
+                    try {
+                        long took = System.nanoTime() - attrT0;
+                        // 座標字串只有慢解碼才建(冷機幾千次物化不能每次配置字串)
+                        String pos = null;
+                        if (LazyContainerRuntime.slowDecode(took)) {
+                            pos = this.getBlockPos().toShortString();
+                        }
+                        LazyContainerRuntime.onEnsureAttributed(attrStack, took, pos);
+                    } catch (Throwable ignored) {
+                        // 觀測失敗絕不影響物化(此時物品已就位)
+                    }
+                }
             } catch (java.io.IOException io) {
                 // decode 自家 bytes 失敗(現實上不可達):還原 pending、保留 raw,下次重試,絕不靜默丟失
                 this.lazycontainer$pending = true;

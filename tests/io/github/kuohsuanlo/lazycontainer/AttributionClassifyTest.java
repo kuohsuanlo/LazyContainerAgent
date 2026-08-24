@@ -160,6 +160,42 @@ class AttributionClassifyTest {
         }));
     }
 
+    /** 解碼耗時累計:總和相加、最大值取大不取小(#223 未結①要的是秒數不是次數)。 */
+    @Test
+    void decodeTimingAccumulates() {
+        StackTraceElement[] st = new StackTraceElement[] {
+                SELF_ENSURE, SELF_GETITEMS,
+                f("net.minecraft.world.level.block.entity.HopperBlockEntity", "tryTakeInItemFromSlot"),
+        };
+        long sum0 = LazyContainerRuntime.decodeNanos.sum();
+        long max0 = LazyContainerRuntime.decodeMaxNanos.get();
+
+        LazyContainerRuntime.onEnsureAttributed(st, 5_000_000L, null);
+        LazyContainerRuntime.onEnsureAttributed(st, 20_000_000L, null);
+        LazyContainerRuntime.onEnsureAttributed(st, 1_000_000L, null);
+
+        assertEquals(26_000_000L, LazyContainerRuntime.decodeNanos.sum() - sum0);
+        assertEquals(Math.max(max0, 20_000_000L), LazyContainerRuntime.decodeMaxNanos.get());
+    }
+
+    /** nanos=0(不計時的舊呼叫形式)不得污染耗時統計。 */
+    @Test
+    void zeroNanosDoesNotCount() {
+        StackTraceElement[] st = new StackTraceElement[] {
+                SELF_ENSURE, f("net.minecraft.world.Containers", "dropContents"),
+        };
+        long sum0 = LazyContainerRuntime.decodeNanos.sum();
+        LazyContainerRuntime.onEnsureAttributed(st);
+        assertEquals(0L, LazyContainerRuntime.decodeNanos.sum() - sum0);
+    }
+
+    /** 慢解碼門檻:預設 100ms,低於門檻不要求呼叫端建座標字串。 */
+    @Test
+    void slowThresholdDefault100ms() {
+        org.junit.jupiter.api.Assertions.assertFalse(LazyContainerRuntime.slowDecode(99_000_000L));
+        org.junit.jupiter.api.Assertions.assertTrue(LazyContainerRuntime.slowDecode(100_000_000L));
+    }
+
     /** 全鏈都是平台(net.minecraft/craftbukkit)但不落入任何具體桶:歸 vanilla。 */
     @Test
     void vanillaOther() {

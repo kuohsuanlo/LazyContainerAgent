@@ -155,13 +155,57 @@ public final class LazyContainerRuntime {
         return ATTRIBUTION;
     }
 
+    // ── 解碼耗時(交付 #223 未結①:冷機谷「還剩多少」要的是秒數,不是次數)──
+    /** 物化解碼累計耗時(奈秒)。 */
+    public static final java.util.concurrent.atomic.LongAdder decodeNanos = new java.util.concurrent.atomic.LongAdder();
+    /** 單次最慢物化(奈秒)。 */
+    public static final AtomicLong decodeMaxNanos = new AtomicLong();
+
+    /** 慢解碼門檻(毫秒),{@code -Dlazycontainer.slowMs=} 可調;≤0 關閉慢解碼點名。 */
+    private static final long SLOW_NANOS = Long.getLong("lazycontainer.slowMs", 100L) * 1_000_000L;
+
+    /** template 用:是否需要為這次物化準備座標字串(只有慢的才值得建字串)。 */
+    public static boolean slowDecode(long nanos) {
+        return SLOW_NANOS > 0 && nanos >= SLOW_NANOS;
+    }
+
+    private static final java.util.concurrent.atomic.AtomicInteger slowLogN = new java.util.concurrent.atomic.AtomicInteger();
+
+    /** 慢解碼點名:印出座標、觸發者桶與耗時(上限 30 筆)——冷機谷的元凶容器會自己現形。 */
+    private static void onSlowDecode(String pos, String bucket, long nanos) {
+        if (slowLogN.incrementAndGet() <= 30) {
+            System.out.println("[LazyContainer] slow decode " + (nanos / 1_000_000L) + "ms @ " + pos
+                    + " trigger=" + bucket);
+        }
+    }
+
     private static final java.util.concurrent.atomic.AtomicInteger attrSampleN = new java.util.concurrent.atomic.AtomicInteger();
     private static final java.util.Set<String> attrSeen = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     /** template 的 ensure() 在真正物化時呼叫:分桶計數;plugin/vanilla 桶另印前 30 個未見過的觸發點。 */
     public static void onEnsureAttributed(StackTraceElement[] st) {
+        onEnsureAttributed(st, 0L, null);
+    }
+
+    /**
+     * 分桶 + 記錄解碼耗時。
+     *
+     * @param nanos 本次物化解碼耗時(奈秒);0 表示不計時
+     * @param slowPos 本次若超過慢門檻,由呼叫端備好的座標字串(否則 null——不建字串不浪費)
+     */
+    public static void onEnsureAttributed(StackTraceElement[] st, long nanos, String slowPos) {
+        if (nanos > 0) {
+            decodeNanos.add(nanos);
+            long prev = decodeMaxNanos.get();
+            while (nanos > prev && !decodeMaxNanos.compareAndSet(prev, nanos)) {
+                prev = decodeMaxNanos.get();
+            }
+        }
         try {
             String bucket = classifyEnsure(st);
+            if (slowPos != null) {
+                onSlowDecode(slowPos, bucket, nanos);
+            }
             switch (bucket) {
                 case "hopper" -> attrHopper.increment();
                 case "comparator" -> attrComparator.increment();
@@ -351,6 +395,8 @@ public final class LazyContainerRuntime {
                             + " attrDrop=" + attrDrop.sum()
                             + " attrVanilla=" + attrVanilla.sum()
                             + " attrPlugin=" + attrPlugin.sum()
+                            + " decodeMs=" + (decodeNanos.sum() / 1_000_000L)
+                            + " decodeMaxMs=" + (decodeMaxNanos.get() / 1_000_000L)
                         : " attribution=off");
     }
 
