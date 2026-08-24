@@ -134,6 +134,174 @@ public final class LazyContainerRuntime {
         dumpTo("lc-benign-", benignDumpN, pos, rawSnbt, eagerSnbt);
     }
 
+    // ── ensure 歸因(交付 #223 未結②:冷機谷/殘餘物化到底是誰觸發的)──────────────────────
+    //
+    // ensure() 每個容器每次載入至多發生一次(不在 tick 熱路徑),所以在物化當下抓一次
+    // stack trace(~10µs)把觸發者分桶,常駐開著也量不到成本;-Dlazycontainer.attribution=false 可關。
+
+    /** 啟動參數 {@code -Dlazycontainer.attribution=false} 關閉 ensure 觸發者歸因(預設開)。 */
+    private static final boolean ATTRIBUTION = !"false".equalsIgnoreCase(System.getProperty("lazycontainer.attribution"));
+
+    public static final java.util.concurrent.atomic.LongAdder attrHopper = new java.util.concurrent.atomic.LongAdder();
+    public static final java.util.concurrent.atomic.LongAdder attrComparator = new java.util.concurrent.atomic.LongAdder();
+    public static final java.util.concurrent.atomic.LongAdder attrPlayer = new java.util.concurrent.atomic.LongAdder();
+    public static final java.util.concurrent.atomic.LongAdder attrQuickshop = new java.util.concurrent.atomic.LongAdder();
+    public static final java.util.concurrent.atomic.LongAdder attrSave = new java.util.concurrent.atomic.LongAdder();
+    public static final java.util.concurrent.atomic.LongAdder attrDrop = new java.util.concurrent.atomic.LongAdder();
+    public static final java.util.concurrent.atomic.LongAdder attrVanilla = new java.util.concurrent.atomic.LongAdder();
+    public static final java.util.concurrent.atomic.LongAdder attrPlugin = new java.util.concurrent.atomic.LongAdder();
+
+    public static boolean attribution() {
+        return ATTRIBUTION;
+    }
+
+    private static final java.util.concurrent.atomic.AtomicInteger attrSampleN = new java.util.concurrent.atomic.AtomicInteger();
+    private static final java.util.Set<String> attrSeen = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** template 的 ensure() 在真正物化時呼叫:分桶計數;plugin/vanilla 桶另印前 30 個未見過的觸發點。 */
+    public static void onEnsureAttributed(StackTraceElement[] st) {
+        try {
+            String bucket = classifyEnsure(st);
+            switch (bucket) {
+                case "hopper" -> attrHopper.increment();
+                case "comparator" -> attrComparator.increment();
+                case "quickshop" -> attrQuickshop.increment();
+                case "save" -> attrSave.increment();
+                case "drop" -> attrDrop.increment();
+                case "plugin" -> {
+                    attrPlugin.increment();
+                    sampleAttr(st, "plugin", false);
+                }
+                case "player" -> {
+                    attrPlayer.increment();
+                    // 鏈上若有外掛 frame(程式化代開:CraftHumanEntity#openInventory),把外掛名印出來,
+                    // 桶仍記 player——營運才分得出「自然玩家」與「外掛代開」(審查 low)
+                    sampleAttr(st, "player", false);
+                }
+                default -> {
+                    attrVanilla.increment();
+                    sampleAttr(st, "vanilla", true);
+                }
+            }
+        } catch (Throwable ignored) {
+            // 歸因純觀測,任何失敗都不得影響物化
+        }
+    }
+
+    /**
+     * 把「實際觸發者 frame」印出來(去重、上限 30),供下一輪補分類規則。
+     * <p>上限先於 {@code attrSeen.add} 檢查——否則超限後集合仍無限收新 sig
+     * (外掛熱重載的 hidden class 名每次不同,會慢性膨脹;審查 low)。</p>
+     *
+     * @param fallbackToInner 鏈上沒有非平台 frame 時,是否退而印鏈內側的平台 frame
+     *                        (vanilla 桶要 true——26.2 破壞鏈就是這樣抓到的;
+     *                        player 桶要 false——自然玩家開箱不用印,只印外掛代開)
+     */
+    private static void sampleAttr(StackTraceElement[] st, String bucket, boolean fallbackToInner) {
+        if (attrSampleN.get() >= 30) {
+            return;
+        }
+        StackTraceElement actor = firstNonPlatformFrame(st);
+        if (actor == null) {
+            if (!fallbackToInner || st.length == 0) {
+                return;
+            }
+            actor = st[Math.min(2, st.length - 1)];
+        }
+        String sig = actor.getClassName() + "#" + actor.getMethodName();
+        if (attrSeen.add(sig) && attrSampleN.incrementAndGet() <= 30) {
+            System.out.println("[LazyContainer] ensure-attr " + bucket + " sample: " + sig);
+        }
+    }
+
+    /**
+     * 把一條 ensure 物化的呼叫堆疊分類成觸發者桶。純函式,可獨立測試。
+     *
+     * <p>先跳過自家 {@code lazycontainer$*} frame,再依「具體優先」掃整條鏈:
+     * quickshop(一中即回)→ save(但鏈上有外掛 frame 時歸 plugin——getState 快照的發起者是外掛)
+     * → hopper → comparator → drop → player;都不中時,鏈上第一個非平台套件的 frame 定
+     * plugin,否則 vanilla。類名比對限定 {@code net.minecraft.} 前綴,外掛的 *Hopper* 類不會
+     * 被誤吃進 hopper 桶。</p>
+     *
+     * <p><b>player 桶語意</b>:玩家「面前開啟」的物化——含外掛經 {@code CraftHumanEntity#openInventory}
+     * 程式化代開(此時鏈上的外掛名會由 sample 機制印出,桶仍記 player)。</p>
+     *
+     * @return {@code "hopper"|"comparator"|"player"|"quickshop"|"save"|"drop"|"plugin"|"vanilla"}
+     */
+    public static String classifyEnsure(StackTraceElement[] st) {
+        boolean saveFallback = false;
+        boolean hopper = false;
+        boolean comparator = false;
+        boolean drop = false;
+        boolean player = false;
+        for (StackTraceElement e : st) {
+            String cls = e.getClassName();
+            String m = e.getMethodName();
+            if (m.startsWith("lazycontainer$")) {
+                if (m.startsWith("lazycontainer$trySaveRaw")) {
+                    saveFallback = true;        // 存檔後備物化——但不能提前 return:
+                }                               // getState() 快照鏈的外層可能是外掛(見末端仲裁)
+                continue;                       // 其餘自家 frame 跳過
+            }
+            // 注意:容器類(BCE/leaf)自己的 frame「不能」整類跳過——26.2 的破壞鏈第一觸點是
+            // BaseContainerBlockEntity#collectImplicitComponents(rig 實測抓到),整類跳過會漏分類。
+            // 守門 frame(getItems/getContents/getItem)本來就不會命中任何桶規則,留著無害。
+            String lower = cls.toLowerCase(java.util.Locale.ROOT);
+            if (lower.contains("quickshop")) {
+                return "quickshop";             // 最具體:發起者是 QuickShop,就算鏈上也有漏斗
+            }
+            // 類名比對一律限定 net.minecraft. 前綴——EpicHoppers/WildStacker 這類外掛的
+            // *Hopper* 類若被吃進 hopper 桶,外掛觸發者就隱形了(審查 medium)
+            boolean mc = cls.startsWith("net.minecraft.");
+            if (mc && cls.contains("Hopper")) {
+                hopper = true;                  // HopperBlockEntity / MinecartHopper / HopperBlock
+            } else if ((mc && cls.contains("ComparatorBlock"))
+                    || m.equals("getAnalogOutputSignal") || m.equals("getRedstoneSignalFromBlockEntity")) {
+                comparator = true;
+            } else if (cls.equals("net.minecraft.world.Containers") || m.equals("dropContents")
+                    || m.equals("collectImplicitComponents") || m.equals("preRemoveSideEffects")) {
+                // 後兩者 = 26.2 破壞/轉掉落物路徑(方塊→物品的 component 收集),rig 實測的第一觸點
+                drop = true;
+            } else if (m.equals("useWithoutItem") || m.equals("useItemOn")
+                    || m.equals("openMenu") || m.equals("openInventory")) {
+                player = true;
+            }
+        }
+        // 末端仲裁:save 鏈上有外掛 frame ⇒ 觸發者是那個外掛(getState 快照),不是 chunk 存檔機器
+        if (saveFallback) {
+            return firstNonPlatformFrame(st) != null ? "plugin" : "save";
+        }
+        if (hopper) {
+            return "hopper";
+        }
+        if (comparator) {
+            return "comparator";
+        }
+        if (drop) {
+            return "drop";
+        }
+        if (player) {
+            return "player";
+        }
+        return firstNonPlatformFrame(st) != null ? "plugin" : "vanilla";
+    }
+
+    /** 鏈上第一個「不是平台(JDK/NMS/Bukkit/Paper)也不是自家」的 frame = 外掛觸發者;沒有則 null。 */
+    private static StackTraceElement firstNonPlatformFrame(StackTraceElement[] st) {
+        for (StackTraceElement e : st) {
+            String cls = e.getClassName();
+            if (cls.startsWith("net.minecraft.") || cls.startsWith("com.mojang.")
+                    || cls.startsWith("org.bukkit.") || cls.startsWith("io.papermc.")
+                    || cls.startsWith("org.spigotmc.") || cls.startsWith("ca.spottedleaf.")
+                    || cls.startsWith("java.") || cls.startsWith("jdk.")
+                    || cls.startsWith("io.github.kuohsuanlo.lazycontainer")) {
+                continue;
+            }
+            return e;
+        }
+        return null;
+    }
+
     private static final boolean DUMP = Boolean.getBoolean("lazycontainer.dump");
     private static final java.util.concurrent.atomic.AtomicInteger dumpN = new java.util.concurrent.atomic.AtomicInteger();
     private static final java.util.concurrent.atomic.AtomicInteger benignDumpN = new java.util.concurrent.atomic.AtomicInteger();
@@ -172,7 +340,18 @@ public final class LazyContainerRuntime {
                 + " summaryBuild=" + summaryBuild.sum()
                 + " summaryMismatch=" + summaryMismatch.sum()
                 + " shadowMismatch=" + shadowMismatch.get()
-                + " benignReorder=" + benignReorder.get();
+                + " benignReorder=" + benignReorder.get()
+                // 關閉時印明確標記而非八個 0——值班的人才分得出「功能關著」與「歸因掛了」(審查 low)
+                + (ATTRIBUTION
+                        ? " attrHopper=" + attrHopper.sum()
+                            + " attrComparator=" + attrComparator.sum()
+                            + " attrPlayer=" + attrPlayer.sum()
+                            + " attrQuickshop=" + attrQuickshop.sum()
+                            + " attrSave=" + attrSave.sum()
+                            + " attrDrop=" + attrDrop.sum()
+                            + " attrVanilla=" + attrVanilla.sum()
+                            + " attrPlugin=" + attrPlugin.sum()
+                        : " attribution=off");
     }
 
     /**

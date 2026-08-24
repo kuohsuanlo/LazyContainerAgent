@@ -38,10 +38,12 @@ echo "== 1. 編譯 template + 測試 =="
 javac -proc:none -nowarn -cp "${NMSCP}:${JUNIT}" -d "$OUT" \
   template/io/github/kuohsuanlo/lazycontainer/LazyContainerTemplate.java \
   tests/io/github/kuohsuanlo/lazycontainer/SummaryDifferentialTest.java \
+  tests/io/github/kuohsuanlo/lazycontainer/AttributionClassifyTest.java \
   src/main/java/io/github/kuohsuanlo/lazycontainer/LazyContainerRuntime.java
 
-echo "== 2. 執行差分測試 =="
+echo "== 2. 執行差分測試 + 歸因分類測試 =="
 java -jar "$JUNIT" execute \
   --class-path "${OUT}:${NMSCP}" \
   --select-class io.github.kuohsuanlo.lazycontainer.SummaryDifferentialTest \
+  --select-class io.github.kuohsuanlo.lazycontainer.AttributionClassifyTest \
   --details=tree --disable-banner

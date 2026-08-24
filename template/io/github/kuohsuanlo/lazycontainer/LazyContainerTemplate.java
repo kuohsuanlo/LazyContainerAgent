@@ -182,6 +182,17 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         this.lazycontainer$pending = false;     // 先清旗標 → 下面 getItems() 不會再 reenter 本方法
         byte[] rawBytes = this.lazycontainer$raw;
         if (rawBytes != null) {
+            if (LazyContainerRuntime.attribution()) {
+                try {
+                    // 歸因(#223 未結②):真解碼的當下抓一次呼叫堆疊分桶——每容器每次載入至多一次,
+                    // 不在 tick 熱路徑;分類邏輯在 Runtime(可獨立測試),這裡只負責抓 frame。
+                    // 放在 rawBytes!=null 分支內:raw==null 的 no-op 物化(空 shulker 等)零解碼成本,
+                    // 不計桶——否則 Σattr>ensure,冷機谷的 decode 歸因報表會被幽靈數字稀釋(審查 medium)。
+                    LazyContainerRuntime.onEnsureAttributed(new Exception().getStackTrace());
+                } catch (Throwable ignored) {
+                    // 觀測失敗絕不影響物化
+                }
+            }
             try {
                 Tag raw = lazycontainer$decodeRaw(rawBytes);        // bytes → Tag(自家 encode 的往返,失敗即拋)
                 CompoundTag tmp = new CompoundTag();
