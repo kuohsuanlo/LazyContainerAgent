@@ -167,7 +167,7 @@ A2 的四個雙向差分案例(非數值 `Slot` / 缺 `Slot` / 越界 `Slot` / `
 
 ```
 [LazyContainer] LazyContainerAgent 26.2-2 —— crafted by 廢土貓大 LogoCat · 廢土 · mcfallout.net
-[LazyContainer] spliced 6 fields + 11 methods into BaseContainerBlockEntity
+[LazyContainer] spliced 6 fields + 18 methods into BaseContainerBlockEntity
 ```
 
 `spliced` 那行的 fields 數這版從 **5 變 6**(新增 `lazycontainer$ensuring`),methods 從 **17 變 18**(新增 `lazycontainer$clear`)。transformer 是**按 `lazycontainer$` 前綴掃 template 的成員**、不是寫死清單,所以新成員自動被 splice;若哪天看到數字沒跟著 template 變,就是 template 沒重新編進 jar。

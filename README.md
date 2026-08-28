@@ -239,7 +239,7 @@ java -Xms8000M -Xmx8000M \
 開機 log 應出現:
 ```
 [LazyContainer] LazyContainerAgent —— crafted by 廢土貓大 LogoCat · 廢土 · mcfallout.net
-[LazyContainer] spliced 2 fields + 7 methods into BaseContainerBlockEntity
+[LazyContainer] spliced 6 fields + 18 methods into BaseContainerBlockEntity
 [LazyContainer] transformed leaf .../ChestBlockEntity
 [LazyContainer] agent installed (transformer registered) [SHADOW mode]
 ```
