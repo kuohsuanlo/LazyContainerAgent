@@ -110,6 +110,15 @@ class EnsureRaceTest {
             return items;
         }
 
+        /**
+         * 忠實模擬改寫後 leaf {@code loadAdditional} 的 offset 16:
+         * {@code putfield items = NonNullList.withSize(...)} —— <b>裸欄位寫、不在 monitor 內、無任何 guard</b>。
+         * 刻意不走 {@link #setItems}(真 leaf 的 setItems 有 GUARD_CLEAR,loadAdditional 的 putfield 沒有)。
+         */
+        void putfieldItemsLikeLoadAdditional(NonNullList<ItemStack> list) {
+            items = list;
+        }
+
         @Override
         protected void setItems(NonNullList<ItemStack> list) {
             items = list;
@@ -310,7 +319,15 @@ class EnsureRaceTest {
 
         System.out.println("[EnsureRaceTest] rounds=" + ROUNDS + " raced=" + racedRounds.get()
                 + " bad=" + badRounds.get() + (samples.isEmpty() ? "" : " samples=" + samples));
-        assertTrue(racedRounds.get() > 0, "T2 從未在 T1 物化期間觀察到 pending=true,測試沒有真的搶到,無效");
+        // 刻意不用 assertTrue(raced > 0) 當閘門:這支是自旋搶跑,偵測力隨可用核心數崩塌
+        // (實測同一台機器:24 核 raced=1982/2000,taskset -c 0 單核只剩 12/2000),
+        // 在單核 CI 上它對舊排序有約 75% 機率放行 —— 拿它當 pass/fail 既會假綠也會假紅。
+        // 真正的確定性把關已由 pendingStaysTrueUntilListIsComplete 承接(與核心數無關,舊排序必紅);
+        // 這裡只把搶到率印出來當診斷。
+        if (racedRounds.get() == 0) {
+            System.out.println("[EnsureRaceTest] 警告:本次完全沒搶到交錯(可用核心太少?),"
+                    + "本測試這一輪不具偵測力,請看 pendingStaysTrueUntilListIsComplete 的結果");
+        }
         assertEquals(0, badRounds.get(),
                 "T2 看到 pending=false 卻讀到半填清單的輪數 = " + badRounds.get() + " / " + ROUNDS + ";樣本:" + samples);
     }
@@ -376,5 +393,169 @@ class EnsureRaceTest {
                 "存檔輸出既不等於原 raw 也不等於完整清單(entries=" + savedSize + "):" + saved);
         assertEquals(null, checkComplete(be.rawItems()), "ensure 結束後清單應完整");
         assertFalse(be.lazycontainer$pending, "ensure 結束後應非 pending");
+    }
+
+    // ───────────────── 測試三:pending 的翻轉時機(確定性,與核心數無關)─────────────────
+
+    /**
+     * 測試一是自旋搶跑,偵測力隨核心數崩塌(實測:24 核 raced=1969/2000、taskset 單核只剩 12/2000),
+     * 在單核 CI 上對舊排序有很高機率放行。這支改用 hook 卡在「ensure 已取得清單、尚未 loadAllItems」
+     * 的確定位置,直接斷言那一刻的 pending —— 舊排序(先清旗標再填)在此必為 false ⟹ 必紅,
+     * 與排程和核心數完全無關。
+     */
+    @Test
+    @DisplayName("ensure 物化到一半時 pending 必須仍為 true(確定性,單核也紅)")
+    void pendingStaysTrueUntilListIsComplete() throws Exception {
+        TestChest be = pendingChest(fullItems());
+        CountDownLatch inEnsure = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        be.hook.set(() -> {
+            inEnsure.countDown();
+            try {
+                release.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        });
+
+        AtomicReference<Throwable> err = new AtomicReference<>();
+        Thread t1 = new Thread(() -> {
+            try {
+                be.lazycontainer$ensure();
+            } catch (Throwable t) {
+                err.compareAndSet(null, t);
+            }
+        }, "lc-ensure-T1");
+        t1.start();
+        assertTrue(inEnsure.await(10, TimeUnit.SECONDS), "T1 未進入 ensure 的解碼點");
+
+        // 前置:確認我們真的卡在「還沒填」的位置(否則下面那條斷言沒有意義)
+        assertNotNull(checkComplete(be.rawItems()), "前置:此刻清單不該已完整,測試卡點失效");
+        // 核心斷言:清單還沒填完 ⟹ 旗標絕不能已經翻成 false(否則其他執行緒會拿到半填清單)
+        assertTrue(be.lazycontainer$pending,
+                "清單尚未填完,pending 卻已是 false ⟹ 其他執行緒的 guard 會跳過物化、直接用半填清單");
+
+        release.countDown();
+        t1.join(10_000);
+        assertFalse(t1.isAlive(), "T1 未結束(疑似死結)");
+        if (err.get() != null) {
+            fail("例外:" + err.get(), err.get());
+        }
+        assertEquals(null, checkComplete(be.rawItems()), "ensure 結束後清單應完整");
+        assertFalse(be.lazycontainer$pending, "ensure 結束後應非 pending");
+    }
+
+    // ───────────── 測試四:活體 BE 重跑 loadAdditional 與在途 ensure 交錯 ─────────────
+
+    /** 只有 slot 0 的 Items(模擬插件把 1..26 清空後 state.update() 寫回)。 */
+    private static ListTag onlySlotZero() {
+        ListTag items = new ListTag();
+        CompoundTag e = new CompoundTag();
+        e.putByte("Slot", (byte) 0);
+        e.putString("id", IDS[0]);
+        e.putInt("count", expectedCount(0));
+        items.add(e);
+        return items;
+    }
+
+    /**
+     * 模擬改寫後 leaf 的 loadAdditional。{@code withGuard=true} 對應 transformer 在方法入口注入的
+     * GUARD_CLEAR(先 {@code lazycontainer$clear()} 進 monitor);false 則是未加 guard 的舊形狀。
+     */
+    private static void simulateLeafLoadAdditional(TestChest be, ListTag newItems, boolean withGuard) {
+        if (withGuard) {
+            be.lazycontainer$clear();                                   // 方法入口 guard(synchronized)
+        }
+        be.putfieldItemsLikeLoadAdditional(NonNullList.withSize(SIZE, ItemStack.EMPTY));  // offset 16:裸 putfield
+        be.lazycontainer$load(input(newItems), be.rawItems());          // offset 35:被 redirect,synchronized
+    }
+
+    /** 跑一次「T1 卡在 ensure 中途、T2 對活體 BE 重跑 loadAdditional」,回傳最終 27 格內容描述。 */
+    private static NonNullList<ItemStack> raceEnsureAgainstLeafLoad(boolean withGuard) throws Exception {
+        TestChest be = pendingChest(fullItems());                       // raw=A:27 格都有東西
+        CountDownLatch inEnsure = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        be.hook.set(() -> {
+            inEnsure.countDown();
+            try {
+                release.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        });
+
+        AtomicReference<Throwable> err = new AtomicReference<>();
+        Thread t1 = new Thread(() -> {
+            try {
+                be.lazycontainer$ensure();
+            } catch (Throwable t) {
+                err.compareAndSet(null, t);
+            }
+        }, "lc-ensure-T1");
+        t1.start();
+        assertTrue(inEnsure.await(10, TimeUnit.SECONDS), "T1 未進入 ensure 的解碼點");
+
+        Thread t2 = new Thread(() -> {
+            try {
+                simulateLeafLoadAdditional(be, onlySlotZero(), withGuard);   // raw=B:插件只留 slot 0
+            } catch (Throwable t) {
+                err.compareAndSet(null, t);
+            }
+        }, "lc-leafload-T2");
+        t2.start();
+        t2.join(300);                       // 讓 T2 走到它會走到的地方(有 guard 時會卡在 clear 的 monitor)
+        release.countDown();
+        t1.join(10_000);
+        t2.join(10_000);
+        assertFalse(t1.isAlive() || t2.isAlive(), "執行緒未結束(疑似死結)");
+        if (err.get() != null) {
+            fail("例外:" + err.get(), err.get());
+        }
+        be.lazycontainer$ensure();          // 之後任何存取都會走到這裡
+        return be.rawItems();
+    }
+
+    /**
+     * A1 漏掉的第五條路徑:leaf 的 {@code loadAdditional} 是「offset 16 裸 putfield 換新空清單」
+     * +「offset 35 才呼叫 synchronized 的 lazycontainer$load」。在途的 ensure() 會把<b>舊</b> raw
+     * 填進剛換上的新清單,之後新 raw 只覆蓋自己有列到的格 ⟹ 插件刪掉的物品原地復活(複製)。
+     * 觸發端是外掛最常見的 {@code Chest s=(Chest)block.getState(); …; s.update();}
+     * (CraftBlockEntityState.update → applyTo(活體BE) → copyData → loadWithComponents → loadAdditional)。
+     */
+    @Test
+    @DisplayName("活體 BE 重跑 loadAdditional 與在途 ensure 交錯:被刪除的物品不得復活")
+    void leafReloadDuringEnsureMustNotResurrectItems() throws Exception {
+        NonNullList<ItemStack> after = raceEnsureAgainstLeafLoad(true);
+        List<String> resurrected = new ArrayList<>();
+        for (int i = 1; i < SIZE; i++) {                 // 新 raw 只有 slot 0,1..26 必須是空的
+            if (!after.get(i).isEmpty()) {
+                resurrected.add(i + ":" + BuiltInRegistries.ITEM.getKey(after.get(i).getItem())
+                        + "x" + after.get(i).getCount());
+            }
+        }
+        assertTrue(resurrected.isEmpty(),
+                "已被 loadAdditional 覆蓋掉的物品復活了(= 複製):" + resurrected);
+        assertFalse(after.get(0).isEmpty(), "新 raw 有列到的 slot 0 應該存在");
+        assertEquals(expectedCount(0), after.get(0).getCount(), "slot 0 的數量應來自新 raw");
+    }
+
+    /**
+     * 特徵測試:證明上面那條 guard 是<b>承重</b>的,不是裝飾。拿掉方法入口的 clear() 之後,
+     * 同一個交錯必定復活物品 —— 若哪天有人把 transformer 的 GUARD_CLEAR 從 loadAdditional 拿掉,
+     * 這條會變綠並提醒他模型改了。
+     */
+    @Test
+    @DisplayName("特徵:拿掉 loadAdditional 入口的 clear guard,同一交錯必復活物品")
+    void withoutLoadGuardItemsDoResurrect() throws Exception {
+        NonNullList<ItemStack> after = raceEnsureAgainstLeafLoad(false);
+        int alive = 0;
+        for (int i = 1; i < SIZE; i++) {
+            if (!after.get(i).isEmpty()) {
+                alive++;
+            }
+        }
+        System.out.println("[EnsureRaceTest] no-guard leaf reload: 復活格數=" + alive + "/" + (SIZE - 1));
+        assertTrue(alive > 0,
+                "沒有 guard 卻沒復活 ⟹ 這個測試的交錯模型已失效(卡點沒卡到),不能再當回歸依據");
     }
 }

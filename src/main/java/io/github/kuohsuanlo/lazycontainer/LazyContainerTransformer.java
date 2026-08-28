@@ -314,10 +314,25 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
         if (desc.equals("(L" + NNL + ";)V") && name.equals("setItems")) {
             return GUARD_CLEAR;
         }
+        // leaf 的載入入口(Chest/Barrel/Shulker 的 loadAdditional、Shulker 的 loadFromTag)。
+        // 它們的方法體是「① putfield items = 全新空清單(裸寫、鎖外)② 才呼叫被 redirect 的
+        // lazycontainer$load(synchronized)」。①②之間若有另一條執行緒的 ensure() 在途,ensure 會把
+        // **舊** raw 填進①剛換上的新清單,之後新 raw 只覆蓋自己有列到的格 ⟹ 被覆蓋掉的物品原地復活
+        // (= 複製)。觸發端是外掛最常見的 Chest s=(Chest)block.getState(); …; s.update();
+        // (CraftBlockEntityState.update → applyTo(活體 BE) → copyData → loadWithComponents → loadAdditional)。
+        // 在方法入口插 clear():S 必須先取得 monitor 才能往下走 ⟹ 在途的 ensure 只能整個發生在①之前
+        // (填的是即將被丟棄的舊清單,無害),不可能跨在①②中間。實測:無此 guard 時 26/26 格復活。
+        if (desc.equals("(L" + VIN + ";)V")
+                && (name.equals("loadAdditional") || name.equals("loadFromTag"))) {
+            return GUARD_CLEAR;
+        }
         return GUARD_NONE;
     }
 
-    /** 方法入口插:ENSURE = {@code if(pending) ensure();};CLEAR = {@code lazycontainer$clear();}(26.2-2:進 monitor)。 */
+    /**
+     * 方法入口插:ENSURE = {@code if(pending) ensure();};CLEAR = {@code lazycontainer$clear();}(26.2-2:進 monitor)。
+     * CLEAR 用於 setItems(換清單)與 loadAdditional/loadFromTag(重新載入)——兩者都會讓既有的 lazy 狀態失效。
+     */
     private static final class GuardMethodVisitor extends MethodVisitor {
         private final String owner;
         private final int kind;
