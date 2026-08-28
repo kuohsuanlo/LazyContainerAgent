@@ -189,6 +189,50 @@ class AttributionClassifyTest {
         assertEquals(0L, LazyContainerRuntime.decodeNanos.sum() - sum0);
     }
 
+    /**
+     * 解碼耗時分佈(四桶)。回答的是「尖峰多常發生」——總量早就不是問題(艦隊 4 台 6 小時
+     * 只花 372 秒),真正會被玩家感覺到的是單次數百毫秒的 region 凍結。
+     * 桶界:&lt;1ms / 1-10ms / 10-100ms / &gt;=100ms;最後一桶另記總耗時,
+     * 用來回答「把尖峰全部消掉能省多少」。
+     */
+    @Test
+    void decodeHistogramBuckets() {
+        StackTraceElement[] st = new StackTraceElement[] {
+                SELF_ENSURE, SELF_GETITEMS,
+                f("net.minecraft.world.level.block.entity.HopperBlockEntity", "tryTakeInItemFromSlot"),
+        };
+        long[] before = {
+            LazyContainerRuntime.decodeLt1ms.sum(), LazyContainerRuntime.decode1to10ms.sum(),
+            LazyContainerRuntime.decode10to100ms.sum(), LazyContainerRuntime.decodeGe100ms.sum(),
+            LazyContainerRuntime.decodeGe100Nanos.sum(),
+        };
+        LazyContainerRuntime.onEnsureAttributed(st,     999_999L, null);   // <1ms
+        LazyContainerRuntime.onEnsureAttributed(st,   1_000_000L, null);   // 1-10ms(下界含)
+        LazyContainerRuntime.onEnsureAttributed(st,   9_999_999L, null);   // 1-10ms
+        LazyContainerRuntime.onEnsureAttributed(st,  10_000_000L, null);   // 10-100ms(下界含)
+        LazyContainerRuntime.onEnsureAttributed(st,  99_999_999L, null);   // 10-100ms
+        LazyContainerRuntime.onEnsureAttributed(st, 100_000_000L, null);   // 100ms+(下界含)
+        LazyContainerRuntime.onEnsureAttributed(st, 500_000_000L, null);   // 100ms+
+
+        assertEquals(1, LazyContainerRuntime.decodeLt1ms.sum() - before[0], "<1ms 桶");
+        assertEquals(2, LazyContainerRuntime.decode1to10ms.sum() - before[1], "1-10ms 桶");
+        assertEquals(2, LazyContainerRuntime.decode10to100ms.sum() - before[2], "10-100ms 桶");
+        assertEquals(2, LazyContainerRuntime.decodeGe100ms.sum() - before[3], "100ms+ 桶");
+        assertEquals(600_000_000L, LazyContainerRuntime.decodeGe100Nanos.sum() - before[4],
+                "100ms+ 桶的總耗時(用來算削峰能省多少)");
+    }
+
+    /** nanos=0(不計時的呼叫形式)不得進任何桶,否則分佈會被灌水。 */
+    @Test
+    void zeroNanosNotInHistogram() {
+        StackTraceElement[] st = new StackTraceElement[] {
+                SELF_ENSURE, f("net.minecraft.world.Containers", "dropContents"),
+        };
+        long b = LazyContainerRuntime.decodeLt1ms.sum();
+        LazyContainerRuntime.onEnsureAttributed(st);
+        assertEquals(0, LazyContainerRuntime.decodeLt1ms.sum() - b, "nanos=0 不該算成 <1ms");
+    }
+
     /** 慢解碼門檻:預設 100ms,低於門檻不要求呼叫端建座標字串。 */
     @Test
     void slowThresholdDefault100ms() {

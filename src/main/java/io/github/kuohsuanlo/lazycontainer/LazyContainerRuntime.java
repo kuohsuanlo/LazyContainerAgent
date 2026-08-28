@@ -161,6 +161,41 @@ public final class LazyContainerRuntime {
     /** 單次最慢物化(奈秒)。 */
     public static final AtomicLong decodeMaxNanos = new AtomicLong();
 
+    // ── 解碼耗時分佈:回答「尖峰多常發生」──────────────────────────────────────────
+    //
+    // 總量早就不是瓶頸(艦隊實測 4 台 6 小時合計只花 372 秒解碼,一台平均 0.4% 的單執行緒)。
+    // 真正會被玩家感覺到的是「單次數百毫秒」——那是一個 region 當場凍結半秒。
+    // 慢解碼點名有 30 筆上限,印完就沒了,看不出頻率;這組桶補的正是那個缺口:
+    // 若 100ms+ 一天只有幾次 ⟹ 不值得為它動危險的存檔路徑;若每分鐘都在發生 ⟹ 才談逐格解碼。
+
+    /** 解碼 &lt;1ms 的次數。 */
+    public static final java.util.concurrent.atomic.LongAdder decodeLt1ms = new java.util.concurrent.atomic.LongAdder();
+    /** 解碼 1–10ms 的次數。 */
+    public static final java.util.concurrent.atomic.LongAdder decode1to10ms = new java.util.concurrent.atomic.LongAdder();
+    /** 解碼 10–100ms 的次數。 */
+    public static final java.util.concurrent.atomic.LongAdder decode10to100ms = new java.util.concurrent.atomic.LongAdder();
+    /** 解碼 &gt;=100ms(尖峰)的次數。 */
+    public static final java.util.concurrent.atomic.LongAdder decodeGe100ms = new java.util.concurrent.atomic.LongAdder();
+    /** 尖峰桶的總耗時(奈秒)——用來直接算「把尖峰全部消掉能省多少」。 */
+    public static final java.util.concurrent.atomic.LongAdder decodeGe100Nanos = new java.util.concurrent.atomic.LongAdder();
+
+    /** 把一次解碼耗時歸進四個桶之一;nanos&lt;=0(不計時的呼叫形式)不進桶,避免灌水。 */
+    private static void histogram(long nanos) {
+        if (nanos <= 0) {
+            return;
+        }
+        if (nanos < 1_000_000L) {
+            decodeLt1ms.increment();
+        } else if (nanos < 10_000_000L) {
+            decode1to10ms.increment();
+        } else if (nanos < 100_000_000L) {
+            decode10to100ms.increment();
+        } else {
+            decodeGe100ms.increment();
+            decodeGe100Nanos.add(nanos);
+        }
+    }
+
     /** 慢解碼門檻(毫秒),{@code -Dlazycontainer.slowMs=} 可調;≤0 關閉慢解碼點名。 */
     private static final long SLOW_NANOS = Long.getLong("lazycontainer.slowMs", 100L) * 1_000_000L;
 
@@ -196,6 +231,7 @@ public final class LazyContainerRuntime {
     public static void onEnsureAttributed(StackTraceElement[] st, long nanos, String slowPos) {
         if (nanos > 0) {
             decodeNanos.add(nanos);
+            histogram(nanos);
             long prev = decodeMaxNanos.get();
             while (nanos > prev && !decodeMaxNanos.compareAndSet(prev, nanos)) {
                 prev = decodeMaxNanos.get();
@@ -397,6 +433,10 @@ public final class LazyContainerRuntime {
                             + " attrPlugin=" + attrPlugin.sum()
                             + " decodeMs=" + (decodeNanos.sum() / 1_000_000L)
                             + " decodeMaxMs=" + (decodeMaxNanos.get() / 1_000_000L)
+                            // 分佈:<1ms/1-10ms/10-100ms/100ms+,末位括號=尖峰桶總耗時
+                            + " decodeHist=" + decodeLt1ms.sum() + "/" + decode1to10ms.sum()
+                                + "/" + decode10to100ms.sum() + "/" + decodeGe100ms.sum()
+                            + " decodeSpikeMs=" + (decodeGe100Nanos.sum() / 1_000_000L)
                         : " attribution=off");
     }
 
