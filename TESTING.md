@@ -1,5 +1,23 @@
 # 自己測試 LazyContainerAgent
 
+## 0) 先跑離線單元/併發測試(最快、不用開服)
+
+```bash
+bash test.sh          # 需要 nms-lib/(同 build.sh)
+```
+三支測試、零 Minecraft server(headless NMS,見 `tests/NmsTestSupport.java`):
+
+- **`SummaryDifferentialTest`** — 同一份未解碼的 `Items`,一邊餵摘要、一邊餵真正的 `ContainerHelper.loadAllItems`,
+  比對兩邊結論。摘要「棄答」不算失敗;只要它開口回答就必須與 vanilla 一致。
+- **`EnsureRaceTest`(26.2-2 / A1)** — 兩條執行緒搶同一個容器的 `ensure()`,斷言「`pending=false` ⟹ 清單完整」
+  與「ensure 中途存檔絕非子集」。`-Dlazycontainer.test.rounds=N` 可調輪數(預設 2000)。
+  **它會自己驗證有沒有真的搶到**(`raced>0`),不會變成假綠;對 26.2-1 的舊順序實跑是 1943/2000 紅。
+- **`AttributionClassifyTest`** — ensure 觸發者歸因分類器(純 JDK)。
+
+**改 `template/` 之後這支一定要跑。** 尤其是任何動到 `pending` / `raw` / `ensuring` / monitor 的改動——
+那幾條不變式的說明見 README「跨執行緒鐵律(26.2-2)」與 `RELEASE-NOTE-26.2-2.md`。
+
+
 測試服在 `.lctest`(最小、無外掛、flat 世界、離線模式、port 25801,
 用 symlink(符號連結,類似捷徑)共用重資產、不另外佔空間)。先確保 jar 是最新的:
 ```bash
@@ -50,7 +68,10 @@ cd .lctest && bash play.sh /tmp/realworld-copy
 ```
 -javaagent:/abs/path/LazyContainerAgent.jar -Dlazycontainer.shadow=true -Dlazycontainer.verbose=true
 ```
-開機 log 應出現 `spliced 2 fields + 6 methods`(splice=把 agent 的欄位/方法接進原版類別裡)+ 三個 `transformed leaf`(被改寫的目標類別)。**先確認備份到位。**
+開機 log 應出現 `spliced 6 fields + 18 methods`(splice=把 agent 的欄位/方法接進原版類別裡)+ 三個 `transformed leaf`(被改寫的目標類別)。
+**splice 的數字必須跟著 `template/` 變**:transformer 是按 `lazycontainer$` 前綴掃 template 成員、不是寫死清單,
+所以改了 template 卻沒看到數字變 = template 沒重新編進 jar(`build.sh` 第 2、3 步)。26.2-2 的 fields 從 5 變 6
+(新增 `lazycontainer$ensuring`)。**先確認備份到位。**
 跑數天看 `shadowMismatch=0` + 無玩家回報少東西 → 才考慮關 shadow 拿效能。
 **回滾**:拔掉那段旗標重啟即回 100% vanilla,不需任何資料遷移(磁碟格式從未改變)。
 

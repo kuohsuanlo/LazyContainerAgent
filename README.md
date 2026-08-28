@@ -109,7 +109,7 @@ vanilla 載入一個放滿地圖畫/唱片的箱子,光把物品從 NBT 解出�
 像搬家公司本來**每個經過倉庫的箱子都拆開檢查再封回**(連沒人問的也拆)。改成:**沒人要看的別拆;沒動過的原封出貨。**
 
 ### 技術機制
-注入 NMS 容器類別,加入兩個合成欄位 + 改寫存取點:
+注入 NMS 容器類別,加入 6 個合成欄位(`pending` / `ensuring` / `raw` + 3 個摘要欄位)+ 改寫存取點:
 
 | 動作 | 計數器 | 說明 |
 |---|---|---|
@@ -117,6 +117,42 @@ vanilla 載入一個放滿地圖畫/唱片的箱子,光把物品從 NBT 解出�
 | **存取時物化** | `ensure` | 首次有人呼 `getItems()/getContents()` → 才把暫存的 raw 解進清單(只解這一個)。 |
 | **原樣寫回** | `rawSave` | 卸載存檔時若該容器全程沒被碰(`pending`)→ 把原始 bytes 逐位元組寫回。**跳過打包。** |
 | **退回 eager** | `eagerLoad` | input 不是 `TagValueInput`(理論上不會)→ 安全退回原本 vanilla 行為。 |
+
+### 跨執行緒鐵律(26.2-2,**改前必讀**)
+
+這幾條不是風格偏好,是 26.2-2 修掉一個真實掉物/複製/存檔殘缺 bug 之後留下的不變式。**動 template 之前先讀完。**
+
+1. **`lazycontainer$pending` 是 `volatile`,而且「填完才翻」。**
+   `ensure()` 的寫入序固定為「逐格填清單 → `raw=null` → **最後** `pending=false`」。任何執行緒只要讀到 `pending==false`,
+   依 happens-before **清單就必然已經完整**。反過來寫(先清旗標再填)就是 26.2-1 的 bug:實測 2000 輪中 1943 輪
+   被另一條執行緒讀到半填清單,最壞把 27 格滿箱存成 `Items: []`。
+2. **碰 `pending` / `raw` 的路徑一律進 `this` monitor。** 載入(`load`)、物化(`ensure`)、存檔(`save`/`saveNoEmpty`)、
+   整批替換(`clear`)四條全部 `synchronized`,彼此序列化。**transformer 的 `GUARD_CLEAR` 必須呼叫 `lazycontainer$clear()`,
+   不可就地 `PUTFIELD`**——就地寫就是鎖外改狀態,等於沒修。
+3. **未持鎖的讀者只准讀 volatile 旗標。** leaf guard(`if (pending) ensure();`)與漏斗摘要查詢不進鎖;
+   它們的正確性完全靠第 1 條。
+4. **`load` 的寫入序是 raw → 摘要 → 最後 `pending=true`。** 讀到 `pending==true` 的查詢端必看得到 raw 與完整摘要。
+5. **`lazycontainer$ensuring`(`Thread`)只做重入偵測。** `ensure()` 在 monitor 內呼叫 `getItems()`,而 guard 看到
+   `pending` 仍是 true 會再進 `ensure()`;monitor 可重入,不擋就是無限遞迴。**不要為了「省一個欄位」把它拿掉。**
+6. **為什麼 Paper 上看不到問題、EndRod 上會**:EndRod 的 PIW(R39)允許非擁有 region 的插件執行緒讀活體容器,
+   而 paper-server 的 `CraftInventory.getItem/getContents` 是**先呼叫 NMS** 才做跨區快照 → guard 與整段解碼都跑在插件執行緒上。
+   舊文件寫的「三路徑皆單一主緒」只描述純 Paper。
+
+回歸測試:`tests/io/github/kuohsuanlo/lazycontainer/EnsureRaceTest.java`(`./test.sh` 會跑)。
+它有 `assertTrue(raced > 0)` 守著「真的有搶到視窗」,不會變成假綠。細節見 [`RELEASE-NOTE-26.2-2.md`](RELEASE-NOTE-26.2-2.md)。
+
+### 熱路徑成本
+
+| 路徑 | 26.2-2 的額外成本 |
+|---|---|
+| 已物化容器的 `getItems()`(穩態的絕大多數) | **一個 volatile 讀**。x86 上就是普通 `mov`(零額外指令,只擋編譯器重排),ARM 為 `ldar`。不進 monitor。 |
+| `ensure()` | 每容器每次載入**至多一次**,不在 tick 熱路徑。 |
+| `load` / `save` / `clear` | 各多一次**無競爭** thin-lock CAS。三者都不是每 tick 路徑(存檔本來就是週期性動作)。 |
+| 漏斗摘要查詢(滿/空檢查) | **零**。只讀欄位,不進鎖。 |
+
+**沒有拿效能換正確性的取捨**;上方效能實證的數字在 26.2-2 之後不變。
+
+---
 
 涵蓋型別:`ChestBlockEntity`、`BarrelBlockEntity`、`ShulkerBoxBlockEntity`。
 **唯一咽喉 = `getItems()`**:NMS `BaseContainerBlockEntity` 所有容器讀寫(isEmpty/getItem/removeItem/setItem/clearContent/掉落/比較器…)都經它,守一個即覆蓋全部;CraftBukkit 的 `getContents()` 會繞過,額外守。`getContainerSize()` 不經內容(結構性),不守。
@@ -236,7 +272,8 @@ java -Xms8000M -Xmx8000M \
 
 - **益處依賴「箱子沒被碰」**:churn / 閒置儲存(載入→沒人碰→卸載)大勝;**活躍的漏斗/比較器分類倉**會把箱子 ensure 掉,純省比例變小(主要益處變成「把載入尖峰打散」)。姊妹專案 **ChunkForceManager** 從「別讓 chunk 反覆載卸」那端互補。
 - **版本綁定**:Paper **26.2 / Java 25**(template major 69)。換版需用對應 NMS 重編 `template/`,並把 ASM 升到能讀目標 classfile 版本。版本不符會在開機/首次載箱子時**大聲報錯**(VerifyError/NoSuchMethod),不會靜默毀資料。詳見下方「版本敏感(務必先讀)」。
-- 不影響:loot table 箱子(走另一條路徑,正交)、雙箱 CompoundContainer(委派到子箱 getItems,已守)、執行緒(載入/tick/卸載皆主執行緒)。
+- 不影響:loot table 箱子(走另一條路徑,正交)、雙箱 CompoundContainer(委派到子箱 getItems,已守)。
+- **多執行緒核心(EndRod / Folia 系)**:26.2-1 以前假設「載入/tick/卸載皆主執行緒」,那個假設**只在純 Paper 成立**——EndRod 的 PIW(R39)允許插件執行緒讀活體容器,舊版因此有真實的半填視窗。26.2-2 起 `pending` 為 volatile、`ensure()` 填完才翻旗標、四條狀態路徑全進 monitor,**在單主緒與多執行緒核心上都正確**。見上方「跨執行緒鐵律」。
 
 ---
 
@@ -249,10 +286,15 @@ src/main/java/io/github/kuohsuanlo/lazycontainer/
   LazyContainerTransformer.java ASM:splice base + 改寫 leaf
 template/.../LazyContainerTemplate.java   對真實 NMS 編譯的延遲邏輯(splice 來源)
 tools/scan_containers.py        掃 region 檔找箱子最密的 chunk(找「載入最貴」的地點)
+tests/.../SummaryDifferentialTest.java  摘要 vs 真 codec 差分(含 A2 案例)
+tests/.../EnsureRaceTest.java          跨執行緒物化視窗回歸(26.2-2 / A1)
+tests/.../NmsTestSupport.java          零 Minecraft server 的 headless NMS 啟動
+test.sh   跑上面三支測試(需 nms-lib/)
 build.sh  pom.xml  nms-lib/(不入 git)
 FINDINGS.md           反編譯確認的事實 + 設計定案 + 風險分析
 ADVERSARIAL-REVIEW.md 對抗審查報告(8 失效模式,12 agent)
 FABLE5-AUDIT.md        Fable 5 二輪對抗審計(49 agent,含記憶體/掉物三問結論)
+RELEASE-NOTE-26.2-2.md 跨執行緒視窗(A1)+ 摘要非數值 Slot(A2)的根因、JMM 論證、紅/綠證據
 TESTING.md            怎麼自己測(自動 round-trip / 手動玩測 / 真實世界副本驗 shadow)
 ```
 

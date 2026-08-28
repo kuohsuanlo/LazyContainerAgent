@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# 跑「刀一(ensure 快取)」摘要邏輯的差分測試 —— 純 JUnit,零 Minecraft server。
+# 跑 template 的 JUnit 測試 —— 零 Minecraft server(headless NMS,見 tests/NmsTestSupport.java)。
 #
-# 同一份未解碼的 Items ListTag,一邊餵給 LazyContainerTemplate.lazycontainer$computeSummary(摘要),
-# 一邊餵給真正的 ContainerHelper.loadAllItems(vanilla 解碼),比對兩邊結論是否一致。
-# 摘要「棄答」不算失敗(退回原版路徑本來就安全);只要它開口回答就必須與 vanilla 一致。
+#  - SummaryDifferentialTest:同一份未解碼的 Items ListTag,一邊餵給 lazycontainer$computeSummary(摘要),
+#    一邊餵給真正的 ContainerHelper.loadAllItems(vanilla 解碼),比對兩邊結論。摘要「棄答」不算失敗;
+#    只要它開口回答就必須與 vanilla 一致。含 26.2-2 的 A2(非數值 Slot)雙向案例。
+#  - EnsureRaceTest(26.2-2 / A1):繼承 template 的可實例化子類,兩條執行緒搶 ensure(),斷言
+#    「pending=false ⟹ 清單完整」與「ensure 中途存檔絕非子集」。-Dlazycontainer.test.rounds=N 可調輪數。
+#  - AttributionClassifyTest:ensure 觸發者歸因分類器(純 JDK)。
 #
 # 需要 nms-lib/(同 build.sh)與 ~/.m2 內的 junit-platform-console-standalone。
 set -euo pipefail
@@ -37,13 +40,17 @@ rm -rf "$OUT" && mkdir -p "$OUT"
 echo "== 1. 編譯 template + 測試 =="
 javac -proc:none -nowarn -cp "${NMSCP}:${JUNIT}" -d "$OUT" \
   template/io/github/kuohsuanlo/lazycontainer/LazyContainerTemplate.java \
+  tests/io/github/kuohsuanlo/lazycontainer/NmsTestSupport.java \
   tests/io/github/kuohsuanlo/lazycontainer/SummaryDifferentialTest.java \
+  tests/io/github/kuohsuanlo/lazycontainer/EnsureRaceTest.java \
   tests/io/github/kuohsuanlo/lazycontainer/AttributionClassifyTest.java \
   src/main/java/io/github/kuohsuanlo/lazycontainer/LazyContainerRuntime.java
 
-echo "== 2. 執行差分測試 + 歸因分類測試 =="
-java -jar "$JUNIT" execute \
+echo "== 2. 執行差分測試 + 併發測試 + 歸因分類測試 =="
+# --sun-misc-unsafe-memory-access=allow:NmsTestSupport 用 Unsafe.allocateInstance 配假 server(JDK 25 會印警告)
+java --sun-misc-unsafe-memory-access=allow -jar "$JUNIT" execute \
   --class-path "${OUT}:${NMSCP}" \
   --select-class io.github.kuohsuanlo.lazycontainer.SummaryDifferentialTest \
+  --select-class io.github.kuohsuanlo.lazycontainer.EnsureRaceTest \
   --select-class io.github.kuohsuanlo.lazycontainer.AttributionClassifyTest \
   --details=tree --disable-banner

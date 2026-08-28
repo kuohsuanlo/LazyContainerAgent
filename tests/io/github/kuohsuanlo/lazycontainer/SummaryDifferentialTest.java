@@ -5,15 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
-import net.minecraft.core.Holder;
 import net.minecraft.core.NonNullList;
 import net.minecraft.core.RegistryAccess;
-import net.minecraft.core.component.DataComponentMap;
-import net.minecraft.core.component.DataComponents;
-import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.ByteTag;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.DoubleTag;
@@ -26,7 +21,6 @@ import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.util.ProblemReporter;
 import net.minecraft.world.ContainerHelper;
-import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.storage.TagValueInput;
 import org.junit.jupiter.api.BeforeAll;
@@ -52,38 +46,24 @@ import org.junit.jupiter.api.Test;
  *
  * <h3>headless 前置</h3>
  * 26.2 的物品 data component 平常由資料包重載管線({@code ReloadableServerResources})綁定,
- * headless 起不動。這裡改用公開的 {@link Holder.Reference#bindComponents} 自行綁一份合成 component map,
- * <b>兩邊(摘要與 vanilla)吃的是同一份</b>,故差分依然成立;唯一不擬真的是「各物品真實的堆疊上限」,
- * 那是單純且穩定的查表輸入,已由真機 shadow 覆核涵蓋。
+ * headless 起不動。這裡改用公開的 {@code Holder.Reference#bindComponents} 自行綁一份合成 component map
+ * (見 {@link NmsTestSupport}),<b>兩邊(摘要與 vanilla)吃的是同一份</b>,故差分依然成立;
+ * 唯一不擬真的是「各物品真實的堆疊上限」,那是單純且穩定的查表輸入,已由真機 shadow 覆核涵蓋。
  */
 @DisplayName("摘要 vs vanilla codec 差分")
 class SummaryDifferentialTest {
 
-    /** 測試用的堆疊上限;綁給所有物品,摘要與 vanilla 共用同一值。 */
-    private static final int MAX_STACK = 64;
+    /** 測試用的堆疊上限(見 {@link NmsTestSupport#MAX_STACK})。 */
+    private static final int MAX_STACK = NmsTestSupport.MAX_STACK;
 
     private static RegistryAccess.Frozen registries;
     private static List<String> itemIds;
 
     @BeforeAll
     static void bootstrapNms() {
-        net.minecraft.SharedConstants.tryDetectVersion();
-        net.minecraft.server.Bootstrap.bootStrap();
-        DataComponentMap synthetic = DataComponentMap.builder()
-                .set(DataComponents.MAX_STACK_SIZE, MAX_STACK)
-                .build();
-        List<String> ids = new ArrayList<>();
-        for (Holder.Reference<Item> h : BuiltInRegistries.ITEM.listElements().toList()) {
-            try {
-                h.bindComponents(synthetic);
-            } catch (Throwable ignored) {
-                // 已綁定過的重複綁定無所謂
-            }
-            ids.add(h.key().identifier().toString());
-        }
-        ids.remove("minecraft:air");
-        itemIds = ids;
-        registries = RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY);
+        NmsTestSupport.bootstrap();          // 見 NmsTestSupport:註冊表 + 合成 component 綁定 + 假 server
+        registries = NmsTestSupport.registries();
+        itemIds = NmsTestSupport.itemIds();
     }
 
     // ───────────────────────── 差分核心 ─────────────────────────
@@ -321,6 +301,130 @@ class SummaryDifferentialTest {
         assertEquals(LazyContainerTemplate.LAZYCONTAINER$SUMMARY_GIVEUP,
                 LazyContainerTemplate.lazycontainer$computeSummary(StringTag.valueOf("not a list"), 27),
                 "raw 非 ListTag 必須棄答");
+    }
+
+    // ───────────────────────── A2(26.2-2):Slot 欄位型別的雙向斷言 ─────────────────────────
+    //
+    // 上面的 assertAgrees 只驗「摘要開口就不能錯」;下面這組把容器做成「26 格滿 + 1 格由受測 entry 決定」,
+    // 讓摘要若誤把受測 entry 當成「乾淨且滿」就會答出「證明全滿」,而 vanilla 真值若丟棄該 entry 就是不滿
+    // ——兩邊必然對撞,測試才有鑑別力(不再是單 entry 那種怎麼答都「不滿」的弱斷言)。
+
+    /** 26 格(slot 1..26)全滿,slot 0 交給受測 entry。 */
+    private static ListTag twentySixFullPlus(CompoundTag probe) {
+        ListTag items = new ListTag();
+        for (int i = 1; i < 27; i++) {
+            items.add(entry(ByteTag.valueOf((byte) i), "minecraft:cobblestone", IntTag.valueOf(MAX_STACK)));
+        }
+        items.add(probe);
+        return items;
+    }
+
+    private static int tri(long packed) {
+        return ((int) (packed & 0xFFFFFFFFL)) - 1;
+    }
+
+    @Test
+    @DisplayName("A2:Slot 為字串(\"0\")的滿堆 + 26 格滿 —— 摘要不得標 clean/證明全滿")
+    void nonNumericSlotMustNotProveFull() {
+        ListTag items = twentySixFullPlus(entry(StringTag.valueOf("0"), "minecraft:cobblestone", IntTag.valueOf(MAX_STACK)));
+        long packed = LazyContainerTemplate.lazycontainer$computeSummary(items, 27);
+        Truth t = vanilla(items, 27);
+        System.out.println("[SummaryDifferentialTest] Slot=\"0\" 字串:vanilla slot0Empty=" + t.empty()[0]
+                + " vanillaFull=" + t.full() + " summary=" + (packed == LazyContainerTemplate.LAZYCONTAINER$SUMMARY_GIVEUP
+                        ? "GIVEUP" : ("bits=0x" + Integer.toHexString((int) (packed >>> 32)) + " tri=" + tri(packed))));
+        assertAgrees("A2:slot-string-0", items, 27);
+        // 無論 DFU 對 partial 的語意為何,非數值 Slot 都不得被標成 clean:摘要要嘛棄答、要嘛不得說「證明全滿」
+        if (packed != LazyContainerTemplate.LAZYCONTAINER$SUMMARY_GIVEUP) {
+            assertTrue(tri(packed) != 1, "非數值 Slot 的 entry 被當成乾淨滿堆 ⟹ 假「證明全滿」⟹ 漏斗永不推入");
+        }
+        // 其他非數值型別同樣處理
+        Tag[] junkSlots = {StringTag.valueOf("x"), new ListTag(), new CompoundTag(), new net.minecraft.nbt.ByteArrayTag(new byte[]{0})};
+        for (Tag js : junkSlots) {
+            ListTag l = twentySixFullPlus(entry(js, "minecraft:cobblestone", IntTag.valueOf(MAX_STACK)));
+            assertAgrees("A2:slot=" + js.getClass().getSimpleName(), l, 27);
+            long p = LazyContainerTemplate.lazycontainer$computeSummary(l, 27);
+            if (p != LazyContainerTemplate.LAZYCONTAINER$SUMMARY_GIVEUP) {
+                assertTrue(tri(p) != 1, "非數值 Slot(" + js.getClass().getSimpleName() + ")不得證明全滿");
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("A2:缺 Slot(預設 0)的滿堆 + 26 格滿 —— 與 vanilla 雙向一致")
+    void absentSlotDefaultsToZero() {
+        ListTag items = twentySixFullPlus(entry(null, "minecraft:cobblestone", IntTag.valueOf(MAX_STACK)));
+        Truth t = vanilla(items, 27);
+        long packed = LazyContainerTemplate.lazycontainer$computeSummary(items, 27);
+        assertAgrees("A2:slot-absent", items, 27);
+        // 雙向:vanilla 若真的把它放進 slot 0(全滿),摘要答「證明全滿」才是最有價值的;答不出也允許但要印出來
+        System.out.println("[SummaryDifferentialTest] Slot 缺席:vanilla slot0Empty=" + t.empty()[0]
+                + " vanillaFull=" + t.full() + " summaryTri=" + (packed == LazyContainerTemplate.LAZYCONTAINER$SUMMARY_GIVEUP ? "GIVEUP" : tri(packed)));
+        if (packed != LazyContainerTemplate.LAZYCONTAINER$SUMMARY_GIVEUP) {
+            assertEquals(t.full(), tri(packed) == 1, "缺 Slot 的滿判定必須與 vanilla 完全一致(雙向)");
+        }
+    }
+
+    @Test
+    @DisplayName("A2:count 為 ByteTag 的 27 格滿 —— 摘要應證明全滿且與 vanilla 一致")
+    void byteTagCount() {
+        ListTag items = new ListTag();
+        for (int i = 0; i < 27; i++) {
+            items.add(entry(ByteTag.valueOf((byte) i), "minecraft:cobblestone", ByteTag.valueOf((byte) MAX_STACK)));
+        }
+        Truth t = vanilla(items, 27);
+        long packed = LazyContainerTemplate.lazycontainer$computeSummary(items, 27);
+        assertAgrees("A2:count-byte", items, 27);
+        assertTrue(t.full(), "前置:vanilla 對 ByteTag count=64 應判全滿");
+        assertTrue(packed != LazyContainerTemplate.LAZYCONTAINER$SUMMARY_GIVEUP && tri(packed) == 1,
+                "ByteTag count 的全滿箱應被摘要證明全滿(否則漏斗白掃)");
+    }
+
+    @Test
+    @DisplayName("A2:Slot 超出 size —— 26 格滿 + 越界 entry ⟹ 不滿;27 格滿 + 越界 entry ⟹ 全滿")
+    void slotBeyondSize() {
+        ListTag notFull = twentySixFullPlus(entry(ByteTag.valueOf((byte) 27), "minecraft:cobblestone", IntTag.valueOf(MAX_STACK)));
+        Truth t1 = vanilla(notFull, 27);
+        long p1 = LazyContainerTemplate.lazycontainer$computeSummary(notFull, 27);
+        assertAgrees("A2:beyond-notfull", notFull, 27);
+        assertTrue(!t1.full(), "前置:越界 entry 被 vanilla 丟棄,slot 0 空 ⟹ 不滿");
+        assertTrue(p1 != LazyContainerTemplate.LAZYCONTAINER$SUMMARY_GIVEUP && tri(p1) == 0, "摘要應證明不滿");
+
+        ListTag full = new ListTag();
+        for (int i = 0; i < 27; i++) {
+            full.add(entry(ByteTag.valueOf((byte) i), "minecraft:cobblestone", IntTag.valueOf(MAX_STACK)));
+        }
+        full.add(entry(IntTag.valueOf(40), "minecraft:diamond", IntTag.valueOf(1)));
+        Truth t2 = vanilla(full, 27);
+        long p2 = LazyContainerTemplate.lazycontainer$computeSummary(full, 27);
+        assertAgrees("A2:beyond-full", full, 27);
+        assertTrue(t2.full(), "前置:越界 entry 不影響 27 格全滿");
+        assertTrue(p2 != LazyContainerTemplate.LAZYCONTAINER$SUMMARY_GIVEUP && tri(p2) == 1, "摘要應證明全滿");
+    }
+
+    @Test
+    @DisplayName("A2:重複 Slot —— 27 格滿 + 同格再一個少量 entry ⟹ 後寫者勝 ⟹ 不滿;反序 ⟹ 全滿")
+    void duplicateSlotLastWriterWins() {
+        ListTag a = new ListTag();
+        for (int i = 0; i < 27; i++) {
+            a.add(entry(ByteTag.valueOf((byte) i), "minecraft:cobblestone", IntTag.valueOf(MAX_STACK)));
+        }
+        a.add(entry(ByteTag.valueOf((byte) 5), "minecraft:cobblestone", IntTag.valueOf(1)));
+        Truth ta = vanilla(a, 27);
+        long pa = LazyContainerTemplate.lazycontainer$computeSummary(a, 27);
+        assertAgrees("A2:dup-last-partial", a, 27);
+        assertTrue(!ta.full(), "前置:後寫者(count=1)勝 ⟹ 不滿");
+        assertTrue(pa != LazyContainerTemplate.LAZYCONTAINER$SUMMARY_GIVEUP && tri(pa) == 0, "摘要應證明不滿");
+
+        ListTag b = new ListTag();
+        b.add(entry(ByteTag.valueOf((byte) 5), "minecraft:cobblestone", IntTag.valueOf(1)));
+        for (int i = 0; i < 27; i++) {
+            b.add(entry(ByteTag.valueOf((byte) i), "minecraft:cobblestone", IntTag.valueOf(MAX_STACK)));
+        }
+        Truth tb = vanilla(b, 27);
+        long pb = LazyContainerTemplate.lazycontainer$computeSummary(b, 27);
+        assertAgrees("A2:dup-last-full", b, 27);
+        assertTrue(tb.full(), "前置:後寫者(count=64)勝 ⟹ 全滿");
+        assertTrue(pb != LazyContainerTemplate.LAZYCONTAINER$SUMMARY_GIVEUP && tri(pb) == 1, "摘要應證明全滿");
     }
 
     // ───────────────────────── raw bytes 往返(方案 A′ 的資料不變鐵則)─────────────────────────

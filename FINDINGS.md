@@ -108,7 +108,7 @@ Base + Chest + Barrel + Shulker **全部 VERIFIED OK**(過程中抓到並修掉�
 | 回寫 raw 掉資料? | 不會。pending==true ⟹ 清單從未物化、無人能改 → 寫的是載入讀到的同一份 bytes。 |
 | 漏攔存取點? | **已證**:getItems() 唯一咽喉 + getContents() 已守;對抗審查窮舉(8 條)確認無第三條直接欄位讀取路徑。 |
 | **DFU 跨版本升級** | **複查後基本無虞**:DataFixerUpper 在「chunk NBT 整體載入時、BlockEntity 構造之前」就跑完 → loadAdditional 看到的 tag、我 stash(暫存)的 raw **恆為 post-DFU(已經跑過 DFU 升級之後的版本)**,回寫 raw == 寫已遷移資料 == vanilla。穩態 parse→encode 亦等冪(重複執行結果不變)。保險作法:升級開機那次開 `-Dlazycontainer.shadow=true`(round-trip 比對自動兜底)。 |
-| 執行緒安全 | **已證**:載入寫(postLoad)、tick 讀寫、卸載存檔(processUnloads→saveChunk→copyOf)三路徑皆**單一主緒** → pending/raw 不需 volatile。 |
+| 執行緒安全 | ~~**已證**:載入寫(postLoad)、tick 讀寫、卸載存檔(processUnloads→saveChunk→copyOf)三路徑皆**單一主緒** → pending/raw 不需 volatile。~~<br>**⚠️ 26.2-2 已修正 —— 這條結論的前提只在純 Paper 成立。** EndRod 的 PIW(R39)允許非擁有 region 的插件執行緒讀活體容器:paper-server 的 `CraftInventory.getItem/getContents` 是**先呼叫 NMS** 再做跨區快照,`Level.getBlockEntity` 對 off-region 執行緒回傳**活體 BE** → leaf guard 與整段 `ensure()` 解碼都會跑在插件執行緒上。舊版「先清旗標再填清單」因此存在真實的半填視窗(實測 2000 輪中 1943 輪讀到半填,最壞把 27 格滿箱存成 `Items: []`)。現行版本:`pending` 為 volatile、`ensure()` 填完才翻旗標、load/save/clear 全進 monitor。詳見 [`RELEASE-NOTE-26.2-2.md`](RELEASE-NOTE-26.2-2.md) 與 `tests/.../EnsureRaceTest.java`。 |
 | 雙箱 CompoundContainer(兩格箱子併成一個大箱子時,Minecraft 用來包成單一容器操作的類別) | **已證**:CompoundContainer 全走 Container 介面、虛擬分派(呼叫方法時依物件實際型別決定要跑哪個實作,不是編譯期就決定死)命中各子箱 getItems() guard,無繞過。 |
 | 記憶體 | raw 是未解碼的 ListTag(bytes),比 vanilla 載入後常駐的「已解碼 ItemStack 物件 + component map」**更小**;被存取後即丟 raw 改持有 parsed(同 vanilla)→ heap ≤ vanilla,無洩漏。 |
 

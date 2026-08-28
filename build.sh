@@ -33,7 +33,7 @@ echo "== 3. inject template .class into shaded jar =="
 
 echo "== 4. verify =="
 echo "-- manifest --"
-unzip -p "$JAR" META-INF/MANIFEST.MF | grep -E 'Premain|Agent-Class|Retransform|Redefine' || true
+unzip -p "$JAR" META-INF/MANIFEST.MF | grep -E 'Premain|Agent-Class|Retransform|Redefine|Implementation-Version' || true
 echo "-- key entries --"
 # head 會提早關管線讓 unzip 吃 SIGPIPE,配 pipefail 會把整個 build 判死 → 用 awk 截斷代替 head
 unzip -l "$JAR" | awk '/lazycontainer\/(LazyContainer(Agent|Runtime|Transformer|Template)|asm\/)/ && ++n<=20'

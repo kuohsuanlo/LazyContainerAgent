@@ -17,7 +17,7 @@
 | loot-table(戰利品箱 + lazy 正交性) | 7 | LootTable 分支不被 redirect,Items 由 raw 保存,兩者 NBT 正交 | 0 |
 | dfu-version(跨版本升級) | 3 | DFU 在 chunk-tag 層、BE 構造前完成,raw 恆為 post-DFU | 0 |
 | block-to-item(破壞掉落/pick-block) | 6 | collectComponents/getDrops 必經 getItems() guard,界伏盒不掉空 | 0 |
-| thread-safety(可見性/競態) | 1 | 三路徑(載入寫/tick 讀寫/存檔讀)皆單一主緒,無需 volatile | 0 |
+| thread-safety(可見性/競態) | 1 | ~~三路徑(載入寫/tick 讀寫/存檔讀)皆單一主緒,無需 volatile~~ **⚠️ 26.2-2 已修正**:前提只在純 Paper 成立,EndRod(PIW R39)上插件執行緒會讀活體容器 → 真的有半填視窗,見文末「26.2-2 更正」 | ~~0~~ **1** |
 | moonrise-paper-conflict(底層 chunk 機制衝突) | 5 | Moonrise 延遲 BE 物件建立,本優化延遲 items decode,兩層互補 | 0 |
 | **raw-aliasing-empty(raw 別名/空容器/型別)** | **3** | **2 真 1 假** | **2** |
 
@@ -68,7 +68,37 @@
 
 ## 已覆蓋無虞
 
-- 咽喉唯一性(getItems/getContents 雙守 + private 欄位)、雙箱委派、戰利品箱與 lazy 正交、DFU 跨版本、破壞掉落/界伏盒不掉空、pick-block(含 op NBT copy)、執行緒安全(單主緒)、Moonrise/Paper 底層相容 —— 共 7 個失效模式群組、約 30 條,證據鏈完整,**確認安全**。
+- 咽喉唯一性(getItems/getContents 雙守 + private 欄位)、雙箱委派、戰利品箱與 lazy 正交、DFU 跨版本、破壞掉落/界伏盒不掉空、pick-block(含 op NBT copy)、~~執行緒安全(單主緒)~~(**⚠️ 26.2-2 已修正**,見文末)、Moonrise/Paper 底層相容 —— 共 7 個失效模式群組、約 30 條,證據鏈完整,**確認安全**。
 - R1/R2 在 **shadow 模式下已自動對齊 vanilla**,預設模式的差異不掉物。
 
 關鍵檔案:`LazyContainerAgent/template/io/github/kuohsuanlo/lazycontainer/LazyContainerTemplate.java`(`trySaveRaw` L117-141、`ensure` L77-91、`eagerItems` L148-157)。
+
+---
+
+## 26.2-2 更正:thread-safety 那條結論在 EndRod 上不成立
+
+> 本節是**後補的更正**,上方原文一字未刪——結論會過期,證據鏈不會,留著才知道當初漏看了什麼。
+
+本報告(以及 `FINDINGS.md` §4)把 thread-safety 判為 0 真 bug,理由是「載入寫 / tick 讀寫 / 卸載存檔三路徑皆單一主緒」,
+並把「未持鎖讀者可能讀到旗標已清、清單未填完」記成**既有設計邊界**。**推論沒錯,前提錯了**:那個前提只描述純 Paper。
+
+在 EndRod 上:
+
+1. **PIW(Plugin-Intent-Wins,R39)明文允許非擁有 region 的插件執行緒讀活體容器。**
+2. paper-server 的 `CraftInventory.getItem` / `getContents` 是**先呼叫 NMS 的 `getItem`/`getContents`**、
+   拿到結果之後才做跨區快照 → **leaf guard 與整段 `ensure()` 解碼都跑在插件執行緒上**,快照擋不住視窗。
+3. `Level.getBlockEntity` 對 off-region 執行緒回傳的是**活體 BE**,不是副本。
+
+因此舊版 `ensure()` 的「先清旗標、再逐格填」是**真 bug**,不是設計邊界:另一條執行緒的 guard 讀到 `pending==false`
+就跳過物化、直接使用半填清單 → 漏斗推入的物品被覆蓋(掉物)、漏斗抽出的量被原量覆蓋(複製)、破壞少掉落、
+`getState()` 快照缺物、**autosave 把半填清單編碼寫盤且之後不再重寫(磁碟永久殘缺)**。
+
+`tests/io/github/kuohsuanlo/lazycontainer/EnsureRaceTest.java` 對舊順序實跑:**2000 輪中 1943 輪**讀到半填清單
+(樣本為 27 格全空),存檔交錯測試把 27 格滿箱寫成 `Items: []`。修正後同一份測試 `bad=0`、`raced=1985`。
+完整根因、JMM 論證、五條後果與紅/綠原始輸出見 [`RELEASE-NOTE-26.2-2.md`](RELEASE-NOTE-26.2-2.md)。
+
+同一版另修 A2:摘要對「`Slot` 欄位存在但非數值」的 entry 舊版仍可標成乾淨滿堆 → 26 格滿 + 一個壞 `Slot` 會被證成
+「全滿」讓漏斗永不推入;現改為整份棄答。
+
+**留給下一輪的教訓**:本報告的每一條「已證安全」都應該連同**它假設的執行模型**一起寫下來。
+「單一主緒」在這個專案裡不是事實,是一個**會隨部署核心改變的前提**。

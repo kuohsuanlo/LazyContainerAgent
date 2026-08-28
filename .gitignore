@@ -13,3 +13,6 @@ nms-lib/
 .cptest/
 *.log
 srt/
+
+# 測試服 log(不入 git)
+logs/

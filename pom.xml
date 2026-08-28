@@ -6,7 +6,7 @@
 
     <groupId>io.github.kuohsuanlo</groupId>
     <artifactId>LazyContainerAgent</artifactId>
-    <version>26.2-1</version>
+    <version>26.2-2</version>
     <packaging>jar</packaging>
     <name>LazyContainerAgent</name>
     <description>Lazy container item deserialization / skip-clean-save for plain Paper via a Java agent</description>
@@ -61,6 +61,7 @@
                             <Can-Retransform-Classes>true</Can-Retransform-Classes>
                             <Can-Redefine-Classes>true</Can-Redefine-Classes>
                             <Implementation-Title>LazyContainerAgent</Implementation-Title>
+                            <Implementation-Version>${project.version}</Implementation-Version>
                             <Implementation-Vendor>廢土貓大 LogoCat (mcfallout.net)</Implementation-Vendor>
                             <Built-By>LogoCat</Built-By>
                             <Author>廢土貓大 LogoCat — mcfallout.net</Author>

@@ -50,9 +50,6 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
     static final String NNL = "net/minecraft/core/NonNullList";
     static final String VIN = "net/minecraft/world/level/storage/ValueInput";
     static final String VOUT = "net/minecraft/world/level/storage/ValueOutput";
-    /** lazycontainer$raw 的欄位描述子。方案 A′ 後是 byte[](原為 Lnet/minecraft/nbt/Tag;)——
-     *  GUARD_CLEAR 的 PUTFIELD 用它,與 template 欄位型別不符會直接 VerifyError。 */
-    static final String RAW_DESC = "[B";
     static final String CONTAINER = "net/minecraft/world/Container";
 
     static final String D_LOAD = "(L" + VIN + ";L" + NNL + ";)V";   // loadAllItems / lazycontainer$load
@@ -320,7 +317,7 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
         return GUARD_NONE;
     }
 
-    /** 方法入口插:ENSURE = {@code if(pending) ensure();};CLEAR = {@code pending=false; raw=null;}。 */
+    /** 方法入口插:ENSURE = {@code if(pending) ensure();};CLEAR = {@code lazycontainer$clear();}(26.2-2:進 monitor)。 */
     private static final class GuardMethodVisitor extends MethodVisitor {
         private final String owner;
         private final int kind;
@@ -344,12 +341,13 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
                 super.visitLabel(skip);
                 super.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
             } else { // GUARD_CLEAR
+                // 26.2-2:必須呼叫 base 的 synchronized lazycontainer$clear(),不可就地 PUTFIELD。
+                // 就地寫兩個欄位是「鎖外改 pending/raw」——與在途的 ensure() 交錯時,可能發生
+                // 「setItems 清了旗標、leaf 換上新清單,而 ensure 接著呼叫 getItems() 拿到新清單、
+                // 把舊 raw 解進去」→ 新清單被舊內容覆蓋。進 monitor 後 clear 只能整個發生在 ensure
+                // 之前或之後,最終狀態恆為「新清單、pending=false、raw=null」= vanilla 的 setItems 結果。
                 super.visitVarInsn(Opcodes.ALOAD, 0);
-                super.visitInsn(Opcodes.ICONST_0);
-                super.visitFieldInsn(Opcodes.PUTFIELD, owner, "lazycontainer$pending", "Z");
-                super.visitVarInsn(Opcodes.ALOAD, 0);
-                super.visitInsn(Opcodes.ACONST_NULL);
-                super.visitFieldInsn(Opcodes.PUTFIELD, owner, "lazycontainer$raw", RAW_DESC);
+                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, owner, "lazycontainer$clear", "()V", false);
             }
         }
     }

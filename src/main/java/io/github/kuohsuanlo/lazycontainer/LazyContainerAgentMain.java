@@ -21,6 +21,20 @@ public final class LazyContainerAgentMain {
     public static final String AUTHOR = "廢土貓大 LogoCat";
     public static final String SITE = "mcfallout.net";
 
+    /**
+     * jar manifest 的 {@code Implementation-Version}(= pom {@code <version>})。
+     * 開機 banner 印出來,讓 log 就能斷定「這台掛的是哪一版 agent」——26.2-2 的兩個正確性修正
+     * 沒有任何外顯行為差異,不印版本就無從在事後從 log 分辨。取不到時為 "unknown"(絕不影響啟動)。
+     */
+    private static String version() {
+        try {
+            String v = LazyContainerAgentMain.class.getPackage().getImplementationVersion();
+            return v == null ? "unknown" : v;
+        } catch (Throwable t) {
+            return "unknown";
+        }
+    }
+
     private LazyContainerAgentMain() {
     }
 
@@ -54,7 +68,8 @@ public final class LazyContainerAgentMain {
     private static void signature() {
         try {
             System.setProperty("lazycontainer.author", AUTHOR + " (" + SITE + ")");
-            System.out.println("[LazyContainer] LazyContainerAgent —— crafted by " + AUTHOR + " · 廢土 · " + SITE);
+            System.out.println("[LazyContainer] LazyContainerAgent " + version()
+                    + " —— crafted by " + AUTHOR + " · 廢土 · " + SITE);
             Thread sig = new Thread(() -> {
                 try {
                     Thread.sleep(Long.MAX_VALUE);
