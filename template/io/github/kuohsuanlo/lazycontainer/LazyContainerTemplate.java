@@ -569,10 +569,15 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
      * 絕不在查詢路徑 parse bytes(漏斗每 tick 打十億次,一次 26 MB parse 就是一次凍結)。</p>
      */
     public int lazycontainer$fullState() {
-        if (!this.lazycontainer$pending || this.lazycontainer$sumState != 1 || this.lazycontainer$lootPending()) {
-            return -1;
+        if (!this.lazycontainer$pending || this.lazycontainer$lootPending()) {
+            return -1;                          // 非 pending:不經摘要也不會解碼;loot:刻意不答(見 lootPending)
         }
-        return this.lazycontainer$sumFullTri;
+        int st = this.lazycontainer$sumState;
+        int tri = (st == 1) ? this.lazycontainer$sumFullTri : -1;
+        if (LazyContainerRuntime.attribution()) {
+            LazyContainerRuntime.onFullQuery(st, tri);   // 「為什麼不肯答」的分佈:逐格解碼值不值得做的判準
+        }
+        return tri;
     }
 
     /** 單箱單格「證明為空」;非 pending 或未開封 loot 容器恆回 false。計數由聚合端負責。 */

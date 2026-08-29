@@ -233,6 +233,33 @@ class AttributionClassifyTest {
         assertEquals(0, LazyContainerRuntime.decodeLt1ms.sum() - b, "nanos=0 不該算成 <1ms");
     }
 
+    /**
+     * 摘要「不肯回答」的原因分類——逐格解碼值不值得做的判準。
+     * <p>漏斗的 isFullContainer 快查有掛摘要,照理不該解碼;它會解碼只有一種情況:摘要棄答。
+     * 棄答的原因決定下一步:若主因是「物品帶自訂 component 所以不敢證明滿」⟹ 放寬證明規則就好,
+     * 零解碼、比逐格更划算;若主因是「真的有空格/真的不滿」⟹ 那是必要解碼,逐格才有用。</p>
+     * 三態:tri=1 滿 / tri=0 不滿 / tri=-1 不知道;sumState=2 整份放棄;非 pending 不算。
+     */
+    @Test
+    void fullQueryOutcomeBuckets() {
+        long[] b = {
+            LazyContainerRuntime.fullAnsweredFull.sum(), LazyContainerRuntime.fullAnsweredNotFull.sum(),
+            LazyContainerRuntime.fullUnknownDirty.sum(), LazyContainerRuntime.fullGaveUp.sum(),
+        };
+        LazyContainerRuntime.onFullQuery(1, 1);     // sumState=1, tri=1  → 證明滿
+        LazyContainerRuntime.onFullQuery(1, 0);     // sumState=1, tri=0  → 證明不滿
+        LazyContainerRuntime.onFullQuery(1, 0);
+        LazyContainerRuntime.onFullQuery(1, -1);    // sumState=1, tri=-1 → 佔滿但有格證明不了(component 等)
+        LazyContainerRuntime.onFullQuery(1, -1);
+        LazyContainerRuntime.onFullQuery(1, -1);
+        LazyContainerRuntime.onFullQuery(2, -1);    // sumState=2 → 整份放棄
+        LazyContainerRuntime.onFullQuery(0, -1);    // sumState=0 → 未建(不該發生但也歸放棄)
+        assertEquals(1, LazyContainerRuntime.fullAnsweredFull.sum() - b[0], "證明滿");
+        assertEquals(2, LazyContainerRuntime.fullAnsweredNotFull.sum() - b[1], "證明不滿");
+        assertEquals(3, LazyContainerRuntime.fullUnknownDirty.sum() - b[2], "佔滿但證明不了");
+        assertEquals(2, LazyContainerRuntime.fullGaveUp.sum() - b[3], "整份放棄");
+    }
+
     /** 慢解碼門檻:預設 100ms,低於門檻不要求呼叫端建座標字串。 */
     @Test
     void slowThresholdDefault100ms() {

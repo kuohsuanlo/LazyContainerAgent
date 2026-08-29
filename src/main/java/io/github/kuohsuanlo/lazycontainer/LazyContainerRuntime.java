@@ -155,6 +155,42 @@ public final class LazyContainerRuntime {
         return ATTRIBUTION;
     }
 
+    // ── 摘要「滿判定」的回答分佈:逐格解碼值不值得做的判準 ────────────────────────────
+    //
+    // 漏斗往外推之前先問 isFullContainer;那裡掛了摘要快查,答得出來就零解碼。它會落到整箱解碼
+    // 只有一種情況:摘要不肯答。「為什麼不肯答」決定下一步——
+    //   fullUnknownDirty(佔滿但有格證明不了:物品帶自訂 component / 未知 id 等)⟹ 放寬證明規則,零解碼
+    //   fullAnsweredNotFull(證明不滿)⟹ 漏斗接著真的要推入,那是必要解碼,逐格解碼才有用
+    //   fullGaveUp(整份放棄:非 ListTag / 非數值 Slot / 摘要關閉)⟹ 看放棄的是什麼
+    // 只計 pending 容器(已物化的不經摘要,也不會解碼)。
+
+    /** 摘要證明「全滿」的次數(漏斗停手,零解碼)。 */
+    public static final java.util.concurrent.atomic.LongAdder fullAnsweredFull = new java.util.concurrent.atomic.LongAdder();
+    /** 摘要證明「不滿」的次數(漏斗會推入 ⟹ 隨後整箱解碼,屬必要工作)。 */
+    public static final java.util.concurrent.atomic.LongAdder fullAnsweredNotFull = new java.util.concurrent.atomic.LongAdder();
+    /** 每格都有 entry、但有格證明不了(count/max 算不出:自訂 component、未知物品…)⟹ 答不知道 ⟹ 整箱解碼。 */
+    public static final java.util.concurrent.atomic.LongAdder fullUnknownDirty = new java.util.concurrent.atomic.LongAdder();
+    /** 摘要整份放棄(sumState!=1)⟹ 答不知道 ⟹ 整箱解碼。 */
+    public static final java.util.concurrent.atomic.LongAdder fullGaveUp = new java.util.concurrent.atomic.LongAdder();
+
+    /**
+     * template 的 fullState() 在 pending 容器上被問時呼叫。
+     *
+     * @param sumState 0=未建 1=有效 2=放棄
+     * @param tri      sumState==1 時的三態:1 滿 / 0 不滿 / -1 不知道(其餘忽略)
+     */
+    public static void onFullQuery(int sumState, int tri) {
+        if (sumState != 1) {
+            fullGaveUp.increment();
+        } else if (tri == 1) {
+            fullAnsweredFull.increment();
+        } else if (tri == 0) {
+            fullAnsweredNotFull.increment();
+        } else {
+            fullUnknownDirty.increment();
+        }
+    }
+
     // ── 解碼耗時(交付 #223 未結①:冷機谷「還剩多少」要的是秒數,不是次數)──
     /** 物化解碼累計耗時(奈秒)。 */
     public static final java.util.concurrent.atomic.LongAdder decodeNanos = new java.util.concurrent.atomic.LongAdder();
@@ -437,6 +473,9 @@ public final class LazyContainerRuntime {
                             + " decodeHist=" + decodeLt1ms.sum() + "/" + decode1to10ms.sum()
                                 + "/" + decode10to100ms.sum() + "/" + decodeGe100ms.sum()
                             + " decodeSpikeMs=" + (decodeGe100Nanos.sum() / 1_000_000L)
+                            // 滿判定回答分佈:證明滿/證明不滿/佔滿但證明不了/整份放棄
+                            + " fullQ=" + fullAnsweredFull.sum() + "/" + fullAnsweredNotFull.sum()
+                                + "/" + fullUnknownDirty.sum() + "/" + fullGaveUp.sum()
                         : " attribution=off");
     }
 
