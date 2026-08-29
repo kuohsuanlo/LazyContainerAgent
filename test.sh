@@ -44,6 +44,7 @@ javac -proc:none -nowarn -cp "${NMSCP}:${JUNIT}" -d "$OUT" \
   tests/io/github/kuohsuanlo/lazycontainer/SummaryDifferentialTest.java \
   tests/io/github/kuohsuanlo/lazycontainer/EnsureRaceTest.java \
   tests/io/github/kuohsuanlo/lazycontainer/AttributionClassifyTest.java \
+  tests/io/github/kuohsuanlo/lazycontainer/ComponentPartialSemanticsTest.java \
   src/main/java/io/github/kuohsuanlo/lazycontainer/LazyContainerRuntime.java
 
 echo "== 2. 執行差分測試 + 併發測試 + 歸因分類測試 =="
@@ -53,4 +54,5 @@ java --sun-misc-unsafe-memory-access=allow -jar "$JUNIT" execute \
   --select-class io.github.kuohsuanlo.lazycontainer.SummaryDifferentialTest \
   --select-class io.github.kuohsuanlo.lazycontainer.EnsureRaceTest \
   --select-class io.github.kuohsuanlo.lazycontainer.AttributionClassifyTest \
+  --select-class io.github.kuohsuanlo.lazycontainer.ComponentPartialSemanticsTest \
   --details=tree --disable-banner

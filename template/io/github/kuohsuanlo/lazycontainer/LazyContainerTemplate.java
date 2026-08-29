@@ -61,7 +61,8 @@ import net.minecraft.world.level.storage.ValueOutput;
  *       未持鎖的讀者(leaf guard、漏斗摘要查詢)只讀 volatile 旗標,永遠不會拿到「旗標已清、清單半填」的狀態。</li>
  *   <li>存檔時(monitor 內):pending 且 raw!=null 且 output 是 TagValueOutput ⟹ 把 raw 解回 Tag 塞進 output
  *       (每次都是全新的私有樹,結構性杜絕「存檔輸出與活容器共用同一棵樹」的別名家族);
- *       寫進磁碟的位元組與讀進來的等價(NBT 二進位往返保序)。否則 ⟹ 先物化再正常 encode。
+ *       寫進磁碟的 Items 與讀進來的<b>結構相等</b>(NBT Tag.equals;compound 內 key 順序可能因 Paper 的
+ *       fastutil CompoundTag 雜湊迭代序而不同,vanilla 重存亦然——不是資料變更)。否則 ⟹ 先物化再正常 encode。
  *       兩種結果都是「完整」的:要嘛原 raw、要嘛物化後的完整清單,絕不是子集。最壞只是少省一次,絕不掉資料。</li>
  *   <li>摘要(sumState/sumBits/sumFullTri)在載入當下「趁樹還在手上」eager 建好——
  *       漏斗的十億級查詢永遠不需要 parse bytes。摘要欄位在 {@code pending=true}(volatile 寫)之前寫入,
@@ -154,7 +155,15 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
             this.lazycontainer$raw = encoded;
             // 摘要 eager 建置:樹此刻還在(免 parse);查詢端不再 lazy build(sumState==0 一律當「不知道」)
             if (LazyContainerRuntime.summary()) {
-                long packed = lazycontainer$computeSummary(itemsTag, this.getContainerSize());
+                long packed;
+                try {
+                    packed = lazycontainer$computeSummary(itemsTag, this.getContainerSize());
+                } catch (Throwable t) {
+                    // 摘要是純觀測,任何例外(例如 Holder components 尚未綁定的 NPE)都不得逃出 load():
+                    // 逃出去的話 chunk 載入路徑會讓 BlockEntity.loadStatic 丟掉整個 BE、活體 reload 路徑會在
+                    // 下次存檔寫出空清單 ⟹ 整箱從磁碟消失。這裡一律當「整份放棄」,raw 照存、行為=不用摘要。
+                    packed = LAZYCONTAINER$SUMMARY_GIVEUP;
+                }
                 if (packed == LAZYCONTAINER$SUMMARY_GIVEUP) {
                     this.lazycontainer$sumState = 2;
                 } else {
@@ -331,7 +340,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
     }
 
     /**
-     * 若容器自載入後從未物化(pending)且可安全回寫,就把原始 "Items" tag 逐位元組塞回 output,回傳 true
+     * 若容器自載入後從未物化(pending)且可安全回寫,就把原始 "Items" tag 原樣塞回 output(結構相等;compound 內 key 順序可能因 Paper CompoundTag 雜湊序而異),回傳 true
      * (呼叫端跳過 encode)。否則先物化(ensure)再回傳 false(呼叫端走正常 encode)。
      * <p><b>呼叫端必須持有 {@code this} monitor</b>(兩個 save 入口皆 synchronized):pending 與 raw 的讀取
      * 只有在鎖內才是一致的快照。</p>
@@ -357,7 +366,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         }
         // 只在 raw 為「真正的 ListTag」時走快路徑;且 allowEmpty==false(shulker)遇空清單不可寫 raw
         // (vanilla 對空清單會 discard "Items")。非 ListTag / 空-shulker 一律退回 ensure+正常 save,
-        // 對所有輸入(含外部/損毀 NBT)逐位元組對齊 vanilla,且不掉物。
+        // 對所有輸入(含外部/損毀 NBT)結構上對齊 vanilla(Tag.equals),且不掉物。
         boolean canWriteRaw = (raw instanceof ListTag)
                 && !(!allowEmpty && ((ListTag) raw).isEmpty());
         if (!canWriteRaw) {
@@ -367,7 +376,9 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         CompoundTag out = ((TagValueOutput) output).buildResult();
         if (LazyContainerRuntime.shadow()) {
             // shadow 是「純觀測」模式:偵測並回報 raw 與 vanilla 重新編碼的差異,但**絕不改寫玩家資料**。
-            // 設計原則(服主要求):寫回磁碟的必須逐位元組等於讀進來的那份,不論兩者語意是否等價。
+            // 設計原則(服主要求):寫回磁碟的必須是讀進來的那份原始資料,不做任何正規化(count:1 等明確
+            // 預設值一律保留),不論語意是否等價。位元組層面唯一的差異來源是 Paper CompoundTag 的雜湊迭代序
+            // (key 順序),那不是資料——見 SummaryDifferentialTest.rawBytesRoundTrip 的三條斷言。
             Tag eager = this.lazycontainer$eagerItems(raw, allowEmpty);
             if (!Objects.equals(eager, raw)) {
                 if (this.lazycontainer$sameItems(raw, eager)) {
@@ -686,29 +697,49 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                 }
                 int max = item.getDefaultMaxStackSize();
                 Tag compsTag = t.get("components");
-                if (compsTag != null) {
-                    if (!(compsTag instanceof CompoundTag)) {
+                // 26.2 + DFU 10.0.21 真 codec 實測(ComponentPartialSemanticsTest 釘住,版本升級若變會先紅):
+                // components 是「逐 component 各自 partial」——壞的被逐個丟掉、好的留著、物品永遠在;
+                // 整個 components 欄位非 compound 也只是整包被丟。所以除了 max_stack_size 之外的任何
+                // component(合法或壞)都不影響「格子有無物品」與「max」。舊規則對帶任何 component 的
+                // entry 一律不敢證明滿,s3 商場掃描 12,754 個全滿箱有 76.3% 因此被迫整箱解碼。
+                if (compsTag instanceof CompoundTag) {
+                    CompoundTag comps = (CompoundTag) compsTag;
+                    // key 的解析要跟 vanilla 同一支:DataComponentPatch.PatchKey.CODEC 先剝 "!" 再 Identifier.tryParse
+                    // ⟹ 裸 max_stack_size / :max_stack_size 都會正規化成 minecraft:max_stack_size 而生效;
+                    // 大寫命名空間/尾端空白 tryParse 失敗 ⟹ 被丟(真 codec 實測 NsProbe / ComponentPartialSemanticsTest)。
+                    int hits = 0;
+                    boolean removal = false;
+                    Tag maxTag = null;
+                    for (String key : comps.keySet()) {
+                        String k = key;
+                        boolean rem = false;
+                        if (k.startsWith("!")) {
+                            rem = true;
+                            k = k.substring(1);
+                        }
+                        Identifier cid = Identifier.tryParse(k);
+                        if (cid != null && "minecraft".equals(cid.getNamespace()) && "max_stack_size".equals(cid.getPath())) {
+                            hits++;
+                            if (rem) {
+                                removal = true;
+                            } else {
+                                maxTag = comps.get(key);
+                            }
+                        }
+                    }
+                    if (hits >= 2 || removal) {
+                        // 重複拼法:勝者由 fastutil map 迭代序決定(實測兩種插入序都取同一個),外部不可複現;
+                        // 移除記號:值為 compound 才生效、值為 Int 被丟,且與設定並存時順序曖昧 ⟹ 一律不證明
                         break body;
                     }
-                    CompoundTag comps = (CompoundTag) compsTag;
-                    // 只允許「沒有 key」或「唯一 key = 合法的 minecraft:max_stack_size」;
-                    // 其他任何 component 都可能讓 DataComponentPatch 解碼失敗(該格實為空)⟹ 不得參與「全滿」證明。
-                    for (String key : comps.keySet()) {
-                        if (!"minecraft:max_stack_size".equals(key)) {
-                            break body;
-                        }
-                    }
-                    Tag maxTag = comps.get("minecraft:max_stack_size");
-                    if (maxTag != null) {
-                        if (!(maxTag instanceof NumericTag)) {
-                            break body;
-                        }
+                    if (maxTag instanceof NumericTag) {
                         int m = ((NumericTag) maxTag).box().intValue();
-                        if (m < 1 || m > 99) {
-                            break body;
+                        if (m >= 1 && m <= 99) {
+                            max = m;                                 // 合法 ⟹ vanilla 用它(壞 sibling 也不影響,實測)
                         }
-                        max = m;
+                        // 超範圍 ⟹ 該 component 被丟 ⟹ 物品預設 max(實測)
                     }
+                    // 非數值 ⟹ 被丟 ⟹ 物品預設 max(實測);其他任何 component 一律不影響格子與 max
                 }
                 clean = true;
                 atMax = count >= max;                                // isFullContainer 的判準:count < max ⟹ 不滿

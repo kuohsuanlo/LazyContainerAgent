@@ -39,4 +39,21 @@ echo "-- key entries --"
 unzip -l "$JAR" | awk '/lazycontainer\/(LazyContainer(Agent|Runtime|Transformer|Template)|asm\/)/ && ++n<=20'
 echo "-- relocated ASM present? --"
 unzip -l "$JAR" | grep -c 'io/github/kuohsuanlo/lazycontainer/asm/' || true
+echo "== 5. bytecode 政策閘門(tools/LockPolicyCheck.java)=="
+# 對「改寫後的真實 NMS 類別」機械驗證:碰 raw/摘要/ensuring 的方法都在 monitor 內、未持鎖讀者只讀
+# volatile pending、三個 leaf 的 13 個入口 guard 到位、無殘留 ContainerHelper.load/saveAllItems、
+# hopper 兩個摘要 hook 在方法入口。0.2 秒;任一違規 ⟹ build 失敗(這是出貨閘門,不是建議)。
+# ASM classpath 用 maven 解析出的那一組(與 transformer 編譯時相同版本,避免 ~/.m2 內多版本混用)。
+mkdir -p tools-out
+mvn -q -B dependency:build-classpath -DincludeGroupIds=org.ow2.asm -Dmdep.outputFile=tools-out/asm.cp >/dev/null
+ASMCP="$(cat tools-out/asm.cp):"
+javac -proc:none -nowarn -cp "${ASMCP}target/classes" -d tools-out tools/LockPolicyCheck.java
+java -cp "tools-out:${ASMCP}target/classes:template-out" LockPolicyCheck \
+  "$(ls nms-lib/*mojmap*.jar nms-lib/paper-*.jar 2>/dev/null | head -1)" > tools-out/policy.log 2>&1 || true
+tail -1 tools-out/policy.log
+if ! grep -q "違規 0 項" tools-out/policy.log; then
+  cat tools-out/policy.log >&2
+  echo "ERROR: bytecode 政策閘門未通過,jar 不得出貨" >&2
+  exit 1
+fi
 echo "DONE: $(readlink -f "$JAR")"

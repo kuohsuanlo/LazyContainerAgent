@@ -270,6 +270,217 @@ class SummaryDifferentialTest {
         }
     }
 
+    /**
+     * 放寬證明規則(26.2 實測,真 codec 逐 component partial:壞的丟、好的留、物品永遠在):
+     * 帶任何非 max_stack_size 的 component 都<b>不影響</b>格子有無物品、也不影響 max。
+     * 舊規則對這種箱子一律「不知道」⟹ 漏斗 isFullContainer 被迫整箱解碼——s3 商場掃描:
+     * 12,754 個全滿箱有 76.3% 因此無法證明滿。本測試要求:全滿且每格帶 custom_data/lore/name 的箱子,
+     * 摘要必須<b>證明全滿</b>(tri==1),且與 vanilla 一致(雙向)。
+     */
+    @Test
+    @DisplayName("放寬:全滿箱每格帶 custom_data/lore/custom_name ⟹ 必須證明全滿")
+    void componentsMustNotBlockFullProof() {
+        for (String kind : new String[]{"custom_data", "lore", "custom_name", "enchantments", "mixed"}) {
+            ListTag items = new ListTag();
+            for (int i = 0; i < 27; i++) {
+                CompoundTag e = entry(ByteTag.valueOf((byte) i), "minecraft:cobblestone", IntTag.valueOf(MAX_STACK));
+                CompoundTag comps = new CompoundTag();
+                switch (kind) {
+                    case "custom_data" -> { CompoundTag cd = new CompoundTag(); cd.putString("shop", "x"); comps.put("minecraft:custom_data", cd); }
+                    case "lore" -> { ListTag l = new ListTag(); l.add(StringTag.valueOf("\"line\"")); comps.put("minecraft:lore", l); }
+                    case "custom_name" -> comps.putString("minecraft:custom_name", "\"hi\"");
+                    case "enchantments" -> { CompoundTag en = new CompoundTag(); en.putInt("minecraft:sharpness", 1); comps.put("minecraft:enchantments", en); }
+                    default -> { CompoundTag cd = new CompoundTag(); cd.putString("a", "b"); comps.put("minecraft:custom_data", cd); comps.putString("minecraft:custom_name", "\"n\""); comps.putInt("minecraft:repair_cost", 3); }
+                }
+                e.put("components", comps);
+                items.add(e);
+            }
+            assertAgrees("relax:" + kind, items, 27);
+            Truth truth = vanilla(items, 27);
+            long packed = LazyContainerTemplate.lazycontainer$computeSummary(items, 27);
+            assertTrue(truth.full(), "前置:vanilla 必須判這箱全滿(kind=" + kind + ")");
+            assertEquals(1, tri(packed), "放寬後摘要必須證明全滿,否則漏斗每次都整箱解碼(kind=" + kind + ")");
+        }
+    }
+
+    /**
+     * 壞 component 不會讓格子空掉(真 codec 實測:lore 給字串、不存在的 key、enchantments 給字串,
+     * 物品都還在、count/max 不變)。摘要對這種全滿箱同樣必須證明滿——但要與 vanilla 雙向一致。
+     */
+    @Test
+    @DisplayName("放寬:壞 component(型別錯/不存在 key)不清空格子 ⟹ 全滿箱仍證明全滿")
+    void brokenComponentKeepsItemAndFullProof() {
+        for (String kind : new String[]{"lore_string", "unknown_key", "enchant_string", "non_compound"}) {
+            ListTag items = new ListTag();
+            for (int i = 0; i < 27; i++) {
+                CompoundTag e = entry(ByteTag.valueOf((byte) i), "minecraft:cobblestone", IntTag.valueOf(MAX_STACK));
+                if (i == 7) {
+                    switch (kind) {
+                        case "lore_string" -> { CompoundTag c = new CompoundTag(); c.putString("minecraft:lore", "garbage"); e.put("components", c); }
+                        case "unknown_key" -> { CompoundTag c = new CompoundTag(); c.putInt("minecraft:does_not_exist", 1); e.put("components", c); }
+                        case "enchant_string" -> { CompoundTag c = new CompoundTag(); c.putString("minecraft:enchantments", "nope"); e.put("components", c); }
+                        default -> e.putString("components", "not-a-compound");
+                    }
+                }
+                items.add(e);
+            }
+            assertAgrees("broken:" + kind, items, 27);
+            Truth truth = vanilla(items, 27);
+            long packed = LazyContainerTemplate.lazycontainer$computeSummary(items, 27);
+            assertEquals(truth.full(), tri(packed) == 1,
+                    "壞 component 的全滿箱:摘要與 vanilla 的「滿」判定必須雙向一致(kind=" + kind + ")");
+        }
+    }
+
+    /**
+     * max_stack_size 是唯一影響「滿」的 component。三種情況都要與 vanilla 雙向一致:
+     * 合法 max=16 + 壞 sibling(max 仍為 16)、max 非數值/超範圍(退回物品預設 max)、
+     * max=16 但 count=64(載入不拒絕,count>=max 仍算滿)。
+     */
+    @Test
+    @DisplayName("放寬:max_stack_size 的三種邊角與 vanilla 雙向一致")
+    void maxStackSizeEdgesAgreeBothWays() {
+        String[] kinds = {"max16_badsibling_count16", "max16_badsibling_count8", "max_string", "max_200", "max_0", "max16_count64"};
+        for (String kind : kinds) {
+            ListTag items = new ListTag();
+            for (int i = 0; i < 27; i++) {
+                int count = MAX_STACK;
+                CompoundTag comps = new CompoundTag();
+                switch (kind) {
+                    case "max16_badsibling_count16" -> { comps.putInt("minecraft:max_stack_size", 16); comps.putString("minecraft:lore", "garbage"); count = 16; }
+                    case "max16_badsibling_count8" -> { comps.putInt("minecraft:max_stack_size", 16); comps.putString("minecraft:lore", "garbage"); count = 8; }
+                    case "max_string" -> comps.putString("minecraft:max_stack_size", "bad");
+                    case "max_200" -> comps.putInt("minecraft:max_stack_size", 200);
+                    case "max_0" -> comps.putInt("minecraft:max_stack_size", 0);
+                    default -> { comps.putInt("minecraft:max_stack_size", 16); count = MAX_STACK; }
+                }
+                CompoundTag e = entry(ByteTag.valueOf((byte) i), "minecraft:cobblestone", IntTag.valueOf(count));
+                e.put("components", comps);
+                items.add(e);
+            }
+            assertAgrees("maxedge:" + kind, items, 27);
+            Truth truth = vanilla(items, 27);
+            long packed = LazyContainerTemplate.lazycontainer$computeSummary(items, 27);
+            assertEquals(truth.full(), tri(packed) == 1,
+                    "max_stack_size 邊角:摘要與 vanilla 的「滿」判定必須雙向一致(kind=" + kind + ")");
+        }
+    }
+
+    /**
+     * max_stack_size 的拼法(真 codec 實測,NsProbe):裸 max_stack_size / :max_stack_size 會被
+     * DataComponentPatch.PatchKey.CODEC 的 Identifier.tryParse 正規化成 minecraft: ⟹ 生效;
+     * 移除記號 "!…" 只在值為 compound 時生效(值為 Int 被丟);同一 entry 重複拼法時勝者由
+     * fastutil map 迭代序決定(兩種插入序都取 99)⟹ 外部不可複現。
+     * 規則:摘要開口就必須與 vanilla 雙向一致;命名空間三種拼法必須開口(不得棄答,否則放寬白做)。
+     */
+    @Test
+    @DisplayName("放寬:max_stack_size 各種拼法與 vanilla 雙向一致;命名空間變體必須開口")
+    void maxStackSizeSpellingsAgreeBothWays() {
+        Object[][] cases = {
+            {"bare16",        16, (java.util.function.Consumer<CompoundTag>) c -> c.putInt("max_stack_size", 16), true},
+            {"colon16",       16, (java.util.function.Consumer<CompoundTag>) c -> c.putInt(":max_stack_size", 16), true},
+            {"bare99_c64",    64, (java.util.function.Consumer<CompoundTag>) c -> c.putInt("max_stack_size", 99), true},
+            {"long16",        16, (java.util.function.Consumer<CompoundTag>) c -> c.putLong("minecraft:max_stack_size", 16L), true},
+            {"upperNs",       16, (java.util.function.Consumer<CompoundTag>) c -> c.putInt("MINECRAFT:max_stack_size", 16), false},
+            {"trailingSpace", 16, (java.util.function.Consumer<CompoundTag>) c -> c.putInt("minecraft:max_stack_size ", 16), false},
+            {"removalInt",    16, (java.util.function.Consumer<CompoundTag>) c -> c.putInt("!minecraft:max_stack_size", 1), false},
+            {"removalEmpty",  16, (java.util.function.Consumer<CompoundTag>) c -> c.put("!minecraft:max_stack_size", new CompoundTag()), false},
+            {"bareRemovalInt",16, (java.util.function.Consumer<CompoundTag>) c -> c.putInt("!max_stack_size", 1), false},
+            {"dupNsBare",     64, (java.util.function.Consumer<CompoundTag>) c -> { c.putInt("minecraft:max_stack_size", 16); c.putInt("max_stack_size", 99); }, false},
+            {"dupBareNs",     64, (java.util.function.Consumer<CompoundTag>) c -> { c.putInt("max_stack_size", 99); c.putInt("minecraft:max_stack_size", 16); }, false},
+            {"setAndRemove",  16, (java.util.function.Consumer<CompoundTag>) c -> { c.putInt("minecraft:max_stack_size", 16); c.put("!minecraft:max_stack_size", new CompoundTag()); }, false},
+        };
+        for (Object[] cs : cases) {
+            String kind = (String) cs[0]; int count = (Integer) cs[1];
+            @SuppressWarnings("unchecked") java.util.function.Consumer<CompoundTag> fill = (java.util.function.Consumer<CompoundTag>) cs[2];
+            boolean mustAnswer = (Boolean) cs[3];
+            ListTag items = new ListTag();
+            for (int i = 0; i < 27; i++) {
+                CompoundTag comps = new CompoundTag();
+                fill.accept(comps);
+                CompoundTag e = entry(ByteTag.valueOf((byte) i), "minecraft:cobblestone", IntTag.valueOf(count));
+                e.put("components", comps);
+                items.add(e);
+            }
+            assertAgrees("spelling:" + kind, items, 27);
+            Truth truth = vanilla(items, 27);
+            long packed = LazyContainerTemplate.lazycontainer$computeSummary(items, 27);
+            int tri = (packed == LazyContainerTemplate.LAZYCONTAINER$SUMMARY_GIVEUP) ? -1 : tri(packed);
+            if (tri != -1) {
+                assertEquals(truth.full(), tri == 1, "拼法 " + kind + ":摘要開口就必須與 vanilla 雙向一致");
+            }
+            if (mustAnswer) {
+                assertTrue(tri != -1, "拼法 " + kind + ":vanilla 會生效的命名空間變體,摘要必須開口(否則放寬白做)");
+            }
+        }
+    }
+
+    /**
+     * 審查抓到的結構性缺口:randomizedFuzz 20,000 份裡 tri==1 為 0 份(從沒全佔用),
+     * randomizedFuzzNearFull 的 component 產生器只塞合法 max ⟹ 放寬後唯一有害的方向
+     * (摘要開口答「滿」)fuzz 零覆蓋。這支把 27 格全部填上、count 多半在 max 附近,
+     * 再把 randomEntry 的整套 component 家族(壞法 + 拼法陷阱)接上去——同一份審查用它在
+     * 修正前的程式碼抓到 167 份「摘要說滿、vanilla 說沒滿」。修正後必須為 0,且要真的有開口。
+     */
+    @Test
+    @DisplayName("隨機模糊(全佔用):逼摘要開口答滿 —— 錯答「滿」次數必須為 0")
+    void randomizedFuzzFullContainers() {
+        Random r = new Random(31337L);
+        int answeredFull = 0;
+        int falseFull = 0;
+        int falseNotFull = 0;
+        for (int iter = 0; iter < 60000; iter++) {
+            // 語料:27 格全是「乾淨滿堆」(count = 該物品的預設 max),再在 1~3 格灑 component 家族——
+            // 這樣多數箱子摘要會開口答滿,而每個陷阱(別名/移除記號值型別/重複拼法/壞 component)都落在
+            // 「答滿」的判斷上;隨機語料辦不到這點(任一格帶亂數 max 就整箱變「不滿」)。
+            ListTag items = new ListTag();
+            for (int i = 0; i < 27; i++) {
+                String id = itemIds.get(r.nextInt(itemIds.size()));
+                CompoundTag e = new CompoundTag();
+                e.putByte("Slot", (byte) i);
+                e.putString("id", id);
+                e.putInt("count", MAX_STACK);                                   // MAX_STACK 已綁給所有物品(見 bootstrap)
+                items.add(e);
+            }
+            int traps = 1 + r.nextInt(3);
+            for (int k = 0; k < traps; k++) {
+                CompoundTag victim = (CompoundTag) items.get(r.nextInt(27));
+                CompoundTag junk = randomEntry(r);                              // 借它的 component 產生器
+                Tag comps = junk.get("components");
+                if (comps != null) {
+                    victim.put("components", comps);
+                }
+                if (r.nextInt(3) == 0) {
+                    victim.putInt("count", 1 + r.nextInt(99));                  // 偶爾把 count 拉離 max
+                }
+            }
+            long packed = LazyContainerTemplate.lazycontainer$computeSummary(items, 27);
+            if (packed == LazyContainerTemplate.LAZYCONTAINER$SUMMARY_GIVEUP) {
+                continue;
+            }
+            int tri = tri(packed);
+            if (tri == -1) {
+                continue;
+            }
+            boolean vf = vanilla(items, 27).full();
+            if (tri == 1) {
+                answeredFull++;
+                if (!vf) {
+                    falseFull++;
+                    if (falseFull <= 3) {
+                        System.out.println("[FULL-FUZZ] 假滿 iter=" + iter + " " + items);
+                    }
+                }
+            } else if (vf) {
+                falseNotFull++;
+            }
+        }
+        System.out.println("[FULL-FUZZ] answeredFull=" + answeredFull + " falseFull=" + falseFull + " falseNotFull=" + falseNotFull);
+        assertEquals(0, falseFull, "摘要錯答「滿」⟹ 漏斗永久停搬,一次都不行");
+        assertEquals(0, falseNotFull, "摘要開口答「不滿」時必須與 vanilla 一致(雙向鐵律)");
+        assertTrue(answeredFull > 5000, "全佔用語料下摘要必須大量開口答滿(否則這支測試沒測到目標方向)");
+    }
+
     @Test
     @DisplayName("結構性垃圾:非 compound entry、巢狀清單、空 entry")
     void structuralGarbage() {
@@ -442,8 +653,21 @@ class SummaryDifferentialTest {
             byte[] b = LazyContainerTemplate.lazycontainer$encodeRaw(items);
             Tag back = LazyContainerTemplate.lazycontainer$decodeRaw(b);
             assertEquals(items, back, "decode(encode(t)) 必須等於 t(掉物=資料毀損)");
+            // 位元組層面:Paper 把 CompoundTag 換成 fastutil Object2ObjectOpenHashMap(8, 0.8f),key 迭代順序
+            // 不是插入順序——compound 內 ≥2 個 key 時 decode→encode 後順序可能調換(3000 份中有少數樣本;
+            // 多數翻轉呈週期 2,但不是全部)。這是 Paper 既有性質、vanilla 重存也改順序,不是資料變更。
+            // 三條斷言各守一件事:
             byte[] b2 = LazyContainerTemplate.lazycontainer$encodeRaw(back);
-            assertArrayEquals(b, b2, "encode(decode(b)) 必須逐位元組等於 b(存檔輸出穩定性)");
+            // (1) 結構不變:重排不得改變任何內容(CompoundTag.equals 是 map 相等,順序無關)
+            assertEquals(back, LazyContainerTemplate.lazycontainer$decodeRaw(b2), "再解一次必須結構相等(資料不變)");
+            // (2) 決定性:存檔永遠從同一份 raw 出發,同一份 bytes 解兩次 encode 必須相同(每次存檔寫出同樣的東西)
+            assertArrayEquals(b2, LazyContainerTemplate.lazycontainer$encodeRaw(LazyContainerTemplate.lazycontainer$decodeRaw(b)),
+                    "同一份 raw 解兩次、各自 encode 必須逐位元組相同(存檔決定性)");
+            // (3) 有鑑別力的強斷言:每個 compound 的 key 數 ≤1 的樣本(無順序可言)仍必須逐位元組穩定——
+            //     哪天 encode 真的掉東西/改型別,這條會紅,不會被「順序」這個理由掩蓋
+            if (maxCompoundKeys(items) <= 1) {
+                assertArrayEquals(b, b2, "單 key compound 樣本必須逐位元組穩定(encode 不得掉東西或改型別)");
+            }
         }
         assertNull(LazyContainerTemplate.lazycontainer$encodeRaw(null));
         assertNull(LazyContainerTemplate.lazycontainer$decodeRaw(null));
@@ -534,6 +758,22 @@ class SummaryDifferentialTest {
         }
     }
 
+    /** 遞迴找出整棵樹裡 compound 的最大 key 數(=0/1 的樣本沒有「順序」可言,可要求逐位元組穩定)。 */
+    private static int maxCompoundKeys(Tag t) {
+        int m = 0;
+        if (t instanceof CompoundTag c) {
+            m = c.size();
+            for (String k : c.keySet()) {
+                m = Math.max(m, maxCompoundKeys(c.get(k)));
+            }
+        } else if (t instanceof ListTag l) {
+            for (Tag x : l) {
+                m = Math.max(m, maxCompoundKeys(x));
+            }
+        }
+        return m;
+    }
+
     private static CompoundTag randomEntry(Random r) {
         Tag slot = switch (r.nextInt(8)) {
             case 0 -> null;
@@ -561,15 +801,39 @@ class SummaryDifferentialTest {
             default -> IntTag.valueOf(MAX_STACK);
         };
         CompoundTag e = entry(slot, id, count);
-        if (r.nextInt(6) == 0) {
+        if (r.nextInt(4) == 0) {
+            // component 家族:合法/壞型別/不存在的 key/超範圍/移除語法/非 compound 全混進來——
+            // 真 codec 是 oracle,摘要只要開口就必須一致;放寬「乾淨」規則後這裡是主要閘門
             CompoundTag comps = new CompoundTag();
-            switch (r.nextInt(4)) {
-                case 0 -> comps.putInt("minecraft:max_stack_size", r.nextInt(120) - 10);
-                case 1 -> comps.putString("minecraft:custom_name", "\"x\"");
-                case 2 -> comps.putInt("!minecraft:max_stack_size", 1);
-                default -> { }
+            int kinds = 1 + r.nextInt(3);
+            for (int k = 0; k < kinds; k++) {
+                switch (r.nextInt(13)) {
+                    case 0 -> comps.putInt("minecraft:max_stack_size", r.nextInt(120) - 10);
+                    case 1 -> comps.putString("minecraft:custom_name", "\"x\"");
+                    case 2 -> comps.putInt("!minecraft:max_stack_size", 1);
+                    case 3 -> comps.putString("minecraft:lore", "garbage");            // 型別錯(要 list)
+                    case 4 -> comps.putString("minecraft:enchantments", "nope");       // 型別錯
+                    case 5 -> comps.putInt("minecraft:does_not_exist", 1);             // 不存在的 key
+                    case 6 -> { CompoundTag cd = new CompoundTag(); cd.putString("shop", "x"); comps.put("minecraft:custom_data", cd); }
+                    case 7 -> comps.putString("minecraft:max_stack_size", "bad");      // max 非數值
+                    case 8 -> comps.putInt("minecraft:max_stack_size", 200);           // max 超範圍
+                    case 9 -> comps.putInt("minecraft:repair_cost", r.nextInt(50));    // 合法整數 component
+                    case 10 -> comps.putInt("minecraft:damage", r.nextInt(50));        // 合法但物品可能不可損
+                    case 11 -> comps.putInt("max_stack_size", r.nextInt(120) - 10);     // 裸命名空間(vanilla 會正規化生效)
+                    default -> { }
+                }
+                switch (r.nextInt(10)) {                                                 // 第二層:拼法陷阱
+                    case 0 -> comps.putInt(":max_stack_size", r.nextInt(120) - 10);
+                    case 1 -> comps.put("!minecraft:max_stack_size", new CompoundTag()); // 移除記號(值={} 才生效)
+                    case 2 -> comps.putInt("!max_stack_size", 1);                       // 裸移除、值型別錯
+                    case 3 -> comps.putInt("MINECRAFT:max_stack_size", 16);             // 大寫:tryParse 失敗被丟
+                    case 4 -> comps.putLong("minecraft:max_stack_size", r.nextInt(120) - 10);
+                    default -> { }
+                }
             }
             e.put("components", comps);
+        } else if (r.nextInt(40) == 0) {
+            e.putString("components", "not-a-compound");                                // components 非 compound
         }
         return e;
     }
