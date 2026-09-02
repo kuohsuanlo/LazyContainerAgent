@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "io.github.kuohsuanlo.lazycontainer.mixin",
+  "compatibilityLevel": "${java}",
+  "mixins": [
+    "BaseContainerBlockEntityMixin",
+    "ChestBlockEntityMixin",
+    "BarrelBlockEntityMixin",
+    "ShulkerBoxBlockEntityMixin"${accessorMixin}
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
