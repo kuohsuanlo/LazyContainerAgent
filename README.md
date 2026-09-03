@@ -251,6 +251,13 @@ java -Xms8000M -Xmx8000M \
 | `-Dlazycontainer.verbose.ms=8000` | verbose 列印間隔(ms,預設 30000)。 |
 | `-Dlazycontainer.dump=true` | mismatch / benign reorder 時把 raw/eager SNBT 各落一檔(`lc-mismatch-N` / `lc-benign-N`,各前 30 次),供離線 diff。 |
 | `-Dlazycontainer.dump.dir=<路徑>` | dump 落檔目錄(預設 `.` = 伺服器工作目錄)。 |
+| `-Dlazycontainer.summary=false` | 關掉「漏斗問滿不滿/這格空不空」的摘要快答(保留延遲解碼本身)。 |
+| `-Dlazycontainer.attribution=false` | 關掉解碼觸發者歸因(stats 行會印 `attribution=off`)。 |
+| `-Dlazycontainer.passthrough=false` | 關掉**存檔直寫**(見下節):未物化的箱子存檔時退回「解成 NBT 樹再交給核心重編碼」的舊路徑。 |
+
+### 存檔直寫(raw passthrough)
+
+沒被碰過的箱子,存檔時不再把暫存的原始 bytes 解成 NBT 樹、再由核心逐節點重新序列化(#261 點名這段是艦隊 5 秒級卡頓的來源之一),而是把 bytes 直接接到核心寫區塊的輸出流:`CompoundTag` 多了一組「原始 Items」欄位,核心呼叫 `write()` 時先把它以標準 named-tag 框架(`[typeId][名稱][payload]`)吐出,其餘欄位照常;`copy()` 會一併帶走。只在核心真正為存檔收集方塊實體 NBT 的視窗(`LevelChunk.getBlockEntityNbtForSaving`)內、非 shadow、且 raw 確實是 ListTag 時啟用,其餘情況一律退回舊路徑;stats 行的 `rawPassthrough=` 計次。輸出與舊路徑**結構相等**(離線用真實 region 檔 A/B 比對過;compound 內 key 順序本來就由 Paper 的雜湊表決定)。
 
 **回滾**:刪掉那幾段旗標重啟 → 回 100% vanilla,**不需任何資料遷移**(硬碟格式沒被改過)。
 

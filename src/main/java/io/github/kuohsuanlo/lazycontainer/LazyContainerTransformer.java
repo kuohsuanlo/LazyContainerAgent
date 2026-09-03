@@ -17,6 +17,13 @@ import org.objectweb.asm.commons.SimpleRemapper;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.LabelNode;
+import org.objectweb.asm.tree.InsnList;
+import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.VarInsnNode;
+import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.FrameNode;
+import org.objectweb.asm.tree.TryCatchBlockNode;
 
 /**
  * 容器延遲反序列化 / 跳過乾淨重存 的 bytecode 注入。
@@ -51,6 +58,13 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
     static final String VIN = "net/minecraft/world/level/storage/ValueInput";
     static final String VOUT = "net/minecraft/world/level/storage/ValueOutput";
     static final String CONTAINER = "net/minecraft/world/Container";
+    // raw passthrough(#261)的兩個改寫目標
+    static final String RUNTIME = "io/github/kuohsuanlo/lazycontainer/LazyContainerRuntime";
+    /** 與 LazyContainerRuntime.passthrough() 同源(同一個 -D),但在 transformer 自己讀:transform() 不可碰 Runtime。 */
+    static final boolean PASSTHROUGH = !"false".equalsIgnoreCase(System.getProperty("lazycontainer.passthrough"));   // bootstrap loader,注入碼可直接 INVOKESTATIC
+    static final String COMPOUND_TAG = "net/minecraft/nbt/CompoundTag";
+    static final String LEVEL_CHUNK = "net/minecraft/world/level/chunk/LevelChunk";
+    static final String D_BE_NBT_FOR_SAVING = "(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/CompoundTag;";
 
     static final String D_LOAD = "(L" + VIN + ";L" + NNL + ";)V";   // loadAllItems / lazycontainer$load
     static final String D_SAVE2 = "(L" + VOUT + ";L" + NNL + ";)V"; // saveAllItems(2) / lazycontainer$save(NoEmpty)
@@ -120,6 +134,15 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
                     return null;
                 }
                 return transformHopper(classfileBuffer);
+            }
+            if (PASSTHROUGH) {   // 注意:transform() 內不得參照 LazyContainerRuntime(它會在此刻透過 transformer 被載入
+                                 // ⟹ ClassCircularityError;rig 實測噴滿整個開機 log)。開關由本類自己讀 property。
+                if (COMPOUND_TAG.equals(className)) {
+                    return transformCompoundTag(classfileBuffer);
+                }
+                if (LEVEL_CHUNK.equals(className)) {
+                    return transformLevelChunk(classfileBuffer);
+                }
             }
         } catch (Throwable t) {
             System.err.println("[LazyContainer] transform failed for " + className + " — leaving vanilla: " + t);
@@ -411,5 +434,138 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
             super.visitInsn(Opcodes.DUP_X2);
             super.visitInsn(Opcodes.POP);
         }
+    }
+
+    // ───────────────────────── raw passthrough(#261)─────────────────────────
+
+    /**
+     * CompoundTag:加 {@code lazycontainer$rawKey}/{@code lazycontainer$rawBytes} 兩欄位;
+     * {@code write(DataOutput)} 開頭注入「rawBytes != null ⟹ LazyContainerRuntime.writeRawEntry(key, bytes, out)」
+     * (格式與 writeNamedTag 逐位元組相同,見 Runtime);{@code copy()} 回傳前把兩欄位帶到新物件。
+     * 這兩個欄位只會在 chunk 存檔路徑(LevelChunk.getBlockEntityNbtForSaving 內)被 template 設定。
+     */
+    private static byte[] transformCompoundTag(byte[] bytes) {
+        ClassReader cr = new ClassReader(bytes);
+        ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
+        final boolean[] hit = new boolean[2];
+        ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String desc, String sig, String[] exceptions) {
+                MethodVisitor mv = super.visitMethod(access, name, desc, sig, exceptions);
+                if (name.equals("write") && desc.equals("(Ljava/io/DataOutput;)V")) {
+                    hit[0] = true;
+                    return new MethodVisitor(Opcodes.ASM9, mv) {
+                        @Override
+                        public void visitCode() {
+                            super.visitCode();
+                            Label skip = new Label();
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitFieldInsn(Opcodes.GETFIELD, COMPOUND_TAG, "lazycontainer$rawBytes", "[B");
+                            super.visitJumpInsn(Opcodes.IFNULL, skip);
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitFieldInsn(Opcodes.GETFIELD, COMPOUND_TAG, "lazycontainer$rawKey", "Ljava/lang/String;");
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitFieldInsn(Opcodes.GETFIELD, COMPOUND_TAG, "lazycontainer$rawBytes", "[B");
+                            super.visitVarInsn(Opcodes.ALOAD, 1);
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, RUNTIME, "writeRawEntry",
+                                    "(Ljava/lang/String;[BLjava/io/DataOutput;)V", false);
+                            super.visitLabel(skip);
+                            super.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
+                        }
+                    };
+                }
+                if (name.equals("copy") && desc.equals("()L" + COMPOUND_TAG + ";")) {
+                    hit[1] = true;
+                    return new MethodVisitor(Opcodes.ASM9, mv) {
+                        @Override
+                        public void visitInsn(int opcode) {
+                            if (opcode == Opcodes.ARETURN) {
+                                // stack: [newTag] → 把兩欄位帶過去
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitFieldInsn(Opcodes.GETFIELD, COMPOUND_TAG, "lazycontainer$rawKey", "Ljava/lang/String;");
+                                super.visitFieldInsn(Opcodes.PUTFIELD, COMPOUND_TAG, "lazycontainer$rawKey", "Ljava/lang/String;");
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitFieldInsn(Opcodes.GETFIELD, COMPOUND_TAG, "lazycontainer$rawBytes", "[B");
+                                super.visitFieldInsn(Opcodes.PUTFIELD, COMPOUND_TAG, "lazycontainer$rawBytes", "[B");
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+                return mv;
+            }
+
+            @Override
+            public void visitEnd() {
+                super.visitField(Opcodes.ACC_PUBLIC, "lazycontainer$rawKey", "Ljava/lang/String;", null, null).visitEnd();
+                super.visitField(Opcodes.ACC_PUBLIC, "lazycontainer$rawBytes", "[B", null, null).visitEnd();
+                super.visitEnd();
+            }
+        };
+        cr.accept(cv, 0);
+        if (!hit[0] || !hit[1]) {
+            System.err.println("[LazyContainer] passthrough: CompoundTag shape mismatch (write=" + hit[0] + " copy=" + hit[1] + ") — leaving vanilla");
+            return null;
+        }
+        System.out.println("[LazyContainer] passthrough armed: CompoundTag.write/copy carry raw Items");
+        return cw.toByteArray();
+    }
+
+    /**
+     * LevelChunk:把 {@code getBlockEntityNbtForSaving} 改名成 {@code lazycontainer$orig$…},再放一支同名同描述子的
+     * 包裝:{@code enterChunkSave(); try { return orig(...); } finally { exitChunkSave(); }}。
+     * 這是唯一會掛 raw 的窗口(它的唯一呼叫者是 SerializableChunkData.copyOf = chunk 存檔)。
+     */
+    private static byte[] transformLevelChunk(byte[] bytes) {
+        ClassReader cr = new ClassReader(bytes);
+        ClassNode cn = new ClassNode();
+        cr.accept(cn, 0);
+        MethodNode orig = null;
+        for (MethodNode m : cn.methods) {
+            if (m.name.equals("getBlockEntityNbtForSaving") && m.desc.equals(D_BE_NBT_FOR_SAVING)) {
+                orig = m;
+                break;
+            }
+        }
+        if (orig == null) {
+            System.err.println("[LazyContainer] passthrough: LevelChunk.getBlockEntityNbtForSaving not found — leaving vanilla");
+            return null;
+        }
+        String origName = "lazycontainer$orig$getBlockEntityNbtForSaving";
+        orig.name = origName;
+        MethodNode w = new MethodNode(Opcodes.ASM9, orig.access, "getBlockEntityNbtForSaving", D_BE_NBT_FOR_SAVING, null, null);
+        LabelNode l0 = new LabelNode();
+        LabelNode l1 = new LabelNode();
+        LabelNode l2 = new LabelNode();
+        InsnList il = w.instructions;
+        il.add(new MethodInsnNode(Opcodes.INVOKESTATIC, RUNTIME, "enterChunkSave", "()V", false));
+        il.add(l0);
+        il.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        il.add(new VarInsnNode(Opcodes.ALOAD, 1));
+        il.add(new VarInsnNode(Opcodes.ALOAD, 2));
+        il.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, LEVEL_CHUNK, origName, D_BE_NBT_FOR_SAVING, false));
+        il.add(new VarInsnNode(Opcodes.ASTORE, 3));
+        il.add(l1);
+        il.add(new MethodInsnNode(Opcodes.INVOKESTATIC, RUNTIME, "exitChunkSave", "()V", false));
+        il.add(new VarInsnNode(Opcodes.ALOAD, 3));
+        il.add(new InsnNode(Opcodes.ARETURN));
+        il.add(l2);
+        il.add(new FrameNode(Opcodes.F_FULL, 3,
+                new Object[] {LEVEL_CHUNK, "net/minecraft/core/BlockPos", "net/minecraft/core/HolderLookup$Provider"},
+                1, new Object[] {"java/lang/Throwable"}));
+        il.add(new VarInsnNode(Opcodes.ASTORE, 4));
+        il.add(new MethodInsnNode(Opcodes.INVOKESTATIC, RUNTIME, "exitChunkSave", "()V", false));
+        il.add(new VarInsnNode(Opcodes.ALOAD, 4));
+        il.add(new InsnNode(Opcodes.ATHROW));
+        w.tryCatchBlocks.add(new TryCatchBlockNode(l0, l1, l2, null));
+        w.maxLocals = 5;
+        w.maxStack = 3;
+        cn.methods.add(w);
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        cn.accept(cw);
+        System.out.println("[LazyContainer] passthrough armed: LevelChunk.getBlockEntityNbtForSaving wrapped (chunk-save window)");
+        return cw.toByteArray();
     }
 }

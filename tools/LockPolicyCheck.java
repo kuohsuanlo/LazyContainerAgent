@@ -13,6 +13,8 @@ import org.objectweb.asm.tree.*;
  *   R3 三個 leaf 的入口 guard 真的插上了(getItems/getContents=ensure、setItems/loadAdditional/loadFromTag=clear)
  *   R4 leaf 的 load/save 內不得殘留 ContainerHelper.loadAllItems/saveAllItems
  *   R5 hopper 的兩個摘要 hook 在方法入口
+ *   R6 raw passthrough(#261):CompoundTag 兩欄位 + write 開頭寫 raw + copy 帶欄位;LevelChunk 的
+ *      getBlockEntityNbtForSaving 被包成 enter/try/orig/finally-exit(any handler)
  */
 public class LockPolicyCheck {
 
@@ -22,6 +24,9 @@ public class LockPolicyCheck {
         "net/minecraft/world/level/block/entity/BarrelBlockEntity",
         "net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity"};
     static final String HOPPER = "net/minecraft/world/level/block/entity/HopperBlockEntity";
+    static final String COMPOUND_TAG = "net/minecraft/nbt/CompoundTag";
+    static final String LEVEL_CHUNK = "net/minecraft/world/level/chunk/LevelChunk";
+    static final String RT = "io/github/kuohsuanlo/lazycontainer/LazyContainerRuntime";
 
     static final String PENDING = "lazycontainer$pending";
     static final Set<String> SUMMARY = Set.of("lazycontainer$sumState","lazycontainer$sumBits","lazycontainer$sumFullTri");
@@ -138,12 +143,45 @@ public class LockPolicyCheck {
         }
         if (hooks != 2) fail("hopper hook 數 = " + hooks + "(應為 2)");
 
+        System.out.println("\n── R6. raw passthrough:CompoundTag / LevelChunk ──");
+        ClassNode ct = out.get(COMPOUND_TAG);
+        if (ct == null) { fail("CompoundTag 未被改寫(transform 回 null)"); } else {
+            boolean fk = false, fb = false;
+            for (FieldNode f : ct.fields) { if (f.name.equals("lazycontainer$rawKey") && f.desc.equals("Ljava/lang/String;")) fk = true; if (f.name.equals("lazycontainer$rawBytes") && f.desc.equals("[B")) fb = true; }
+            if (fk && fb) ok("CompoundTag 有 lazycontainer$rawKey / lazycontainer$rawBytes"); else fail("CompoundTag 缺 raw 欄位 key=" + fk + " bytes=" + fb);
+            MethodNode wr = null, cp = null;
+            for (MethodNode m : ct.methods) { if (m.name.equals("write") && m.desc.equals("(Ljava/io/DataOutput;)V")) wr = m; if (m.name.equals("copy") && m.desc.equals("()L" + COMPOUND_TAG + ";")) cp = m; }
+            if (wr == null) fail("CompoundTag.write(DataOutput) 不存在"); else {
+                boolean sawGet = false, sawCall = false; int idx = 0;
+                for (AbstractInsnNode in : wr.instructions) { if (idx++ > 12) break;
+                    if (in instanceof FieldInsnNode fi && fi.name.equals("lazycontainer$rawBytes")) sawGet = true;
+                    if (in instanceof MethodInsnNode mi && mi.owner.equals(RT) && mi.name.equals("writeRawEntry")) sawCall = true; }
+                if (sawGet && sawCall) ok("CompoundTag.write 開頭:rawBytes 判斷 + Runtime.writeRawEntry"); else fail("CompoundTag.write 開頭沒有 passthrough 注入(get=" + sawGet + " call=" + sawCall + ")");
+            }
+            if (cp == null) fail("CompoundTag.copy() 不存在"); else {
+                boolean put = false; for (AbstractInsnNode in : cp.instructions) if (in instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.PUTFIELD && fi.name.equals("lazycontainer$rawBytes")) put = true;
+                if (put) ok("CompoundTag.copy 把 raw 欄位帶到新物件"); else fail("CompoundTag.copy 沒帶 raw 欄位(chunk 存檔若 copy 會掉 Items)");
+            }
+        }
+        ClassNode lc = out.get(LEVEL_CHUNK);
+        if (lc == null) { fail("LevelChunk 未被改寫"); } else {
+            MethodNode w = null, o = null;
+            for (MethodNode m : lc.methods) { if (m.name.equals("getBlockEntityNbtForSaving")) w = m; if (m.name.equals("lazycontainer$orig$getBlockEntityNbtForSaving")) o = m; }
+            if (o == null) fail("LevelChunk 缺 lazycontainer$orig$getBlockEntityNbtForSaving(原方法未改名)"); else ok("LevelChunk 原方法已改名保留");
+            if (w == null) fail("LevelChunk 缺包裝 getBlockEntityNbtForSaving"); else {
+                int enter = 0, exit = 0; boolean callOrig = false;
+                for (AbstractInsnNode in : w.instructions) if (in instanceof MethodInsnNode mi) { if (mi.owner.equals(RT) && mi.name.equals("enterChunkSave")) enter++; if (mi.owner.equals(RT) && mi.name.equals("exitChunkSave")) exit++; if (mi.name.equals("lazycontainer$orig$getBlockEntityNbtForSaving")) callOrig = true; }
+                boolean anyHandler = false; for (TryCatchBlockNode tb : w.tryCatchBlocks) if (tb.type == null) anyHandler = true;
+                if (enter == 1 && exit >= 2 && callOrig && anyHandler) ok("LevelChunk 包裝:enter ×1、exit ×" + exit + "(正常+handler)、呼叫 orig、any handler 到位");
+                else fail("LevelChunk 包裝形狀不對 enter=" + enter + " exit=" + exit + " orig=" + callOrig + " anyHandler=" + anyHandler + "(旗標可能殘留 ⟹ 非存檔路徑也走 passthrough = 資料風險)");
+            }
+        }
         System.out.println("\n=== 結果:通過 " + checks + " 項,違規 " + violations + " 項 ===");
         System.exit(violations == 0 ? 0 : 1);
     }
 
     static List<String> allTargets(){
-        List<String> l = new ArrayList<>(); l.add(BASE); l.addAll(Arrays.asList(LEAVES)); l.add(HOPPER); return l; }
+        List<String> l = new ArrayList<>(); l.add(BASE); l.addAll(Arrays.asList(LEAVES)); l.add(HOPPER); l.add(COMPOUND_TAG); l.add(LEVEL_CHUNK); return l; }
     static String short_(String s){ return s.substring(s.lastIndexOf('/')+1); }
     static boolean hasMonitor(MethodNode m){
         for (AbstractInsnNode in : m.instructions) if (in.getOpcode()==Opcodes.MONITORENTER) return true;

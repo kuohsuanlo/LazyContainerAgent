@@ -357,6 +357,22 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
             this.lazycontainer$ensure();
             return false;
         }
+        // ── raw passthrough(#261):chunk 存檔路徑不解析,bytes 直接掛到輸出 compound,序列化時原樣寫出 ──
+        // 只在 LevelChunk.getBlockEntityNbtForSaving 內(per-thread 旗標)且非 shadow;
+        // 其他呼叫者(/data、structure、getState、封包)會「讀」輸出樹,必須照舊給它們一棵真的樹。
+        // allowEmpty==false(shulker)遇空清單 vanilla 會 discard "Items",空與否不解析就能從 payload 判(見 Runtime)。
+        if (LazyContainerRuntime.passthrough() && LazyContainerRuntime.inChunkSave() && !LazyContainerRuntime.shadow()
+                && LazyContainerRuntime.rawIsListTag(rawBytes)
+                && (allowEmpty || !LazyContainerRuntime.rawListIsEmpty(rawBytes))) {
+            CompoundTag pt = ((TagValueOutput) output).buildResult();
+            pt.remove("Items");                                             // 防呆:同 key 不得同時存在於 map 與 raw
+            if (LazyContainerRuntime.attachRaw(pt, "Items", rawBytes)) {
+                LazyContainerRuntime.onRawSave();
+                LazyContainerRuntime.onRawPassthrough();
+                return true;
+            }
+            // attach 失敗(CompoundTag 未被改寫)⟹ 落回下面的解析路徑,行為與 26.2-2 完全相同
+        }
         Tag raw;
         try {
             raw = lazycontainer$decodeRaw(rawBytes);    // 每次存檔 parse 一棵**全新的私有樹**(取代舊版的 raw.copy())

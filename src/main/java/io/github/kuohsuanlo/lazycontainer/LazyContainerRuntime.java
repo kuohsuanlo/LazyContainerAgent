@@ -191,6 +191,113 @@ public final class LazyContainerRuntime {
         }
     }
 
+    // ── raw passthrough(#261):chunk 存檔時未物化容器的 Items 直接寫 bytes,不再 bytes→樹→bytes ──
+    //
+    // 機制:transformer 在 net.minecraft.nbt.CompoundTag 加兩個欄位(lazycontainer$rawKey / lazycontainer$rawBytes)
+    // 並在 CompoundTag.write(DataOutput) 開頭注入「rawBytes!=null ⟹ 先把它寫成一個具名 entry」;
+    // LevelChunk.getBlockEntityNbtForSaving 被包成 try/finally 設 per-thread 旗標,只有這條(chunk 存檔)
+    // 路徑會掛 raw——其他呼叫者(/data、structure、getState、封包)照舊解析成樹,因為它們會「讀」那棵樹。
+    // -Dlazycontainer.passthrough=false 整條關閉(transformer 不改 CompoundTag/LevelChunk,template 走舊路)。
+
+    private static final boolean PASSTHROUGH = !"false".equalsIgnoreCase(System.getProperty("lazycontainer.passthrough"));
+
+    public static boolean passthrough() {
+        return PASSTHROUGH;
+    }
+
+    /** 走 passthrough 的存檔次數(rawSave 的子集)。 */
+    public static final java.util.concurrent.atomic.LongAdder rawPassthrough = new java.util.concurrent.atomic.LongAdder();
+
+    public static void onRawPassthrough() {
+        rawPassthrough.increment();
+    }
+
+    /** per-thread 巢狀深度:>0 表示此執行緒正在 LevelChunk.getBlockEntityNbtForSaving 內(chunk 存檔)。 */
+    private static final ThreadLocal<int[]> CHUNK_SAVE_DEPTH = new ThreadLocal<int[]>() {
+        @Override
+        protected int[] initialValue() {
+            return new int[1];
+        }
+    };
+
+    public static void enterChunkSave() {
+        CHUNK_SAVE_DEPTH.get()[0]++;
+    }
+
+    public static void exitChunkSave() {
+        int[] d = CHUNK_SAVE_DEPTH.get();
+        if (d[0] > 0) {
+            d[0]--;
+        }
+    }
+
+    public static boolean inChunkSave() {
+        return CHUNK_SAVE_DEPTH.get()[0] > 0;
+    }
+
+    /** raw 是 {@code NbtIo.writeAnyTag} 框架([typeId][payload]);ListTag 的 typeId = 9。 */
+    public static boolean rawIsListTag(byte[] raw) {
+        return raw != null && raw.length >= 6 && raw[0] == 9;
+    }
+
+    /** ListTag payload = [elemType byte][int32 length]…;不解析就能判空(shulker 的 allowEmpty=false 要用)。 */
+    public static boolean rawListIsEmpty(byte[] raw) {
+        if (!rawIsListTag(raw)) {
+            return false;
+        }
+        int n = ((raw[2] & 0xFF) << 24) | ((raw[3] & 0xFF) << 16) | ((raw[4] & 0xFF) << 8) | (raw[5] & 0xFF);
+        return n == 0;
+    }
+
+    /**
+     * 注入進 CompoundTag.write 開頭:把 raw 寫成一個具名 entry。
+     * 格式與 CompoundTag.writeNamedTag 逐位元組相同:[typeId][modified-UTF name][payload];
+     * raw[0] 就是 typeId、raw[1..] 就是 payload(writeAnyTag 框架)。typeId==0(END)不寫——那是 compound 的結尾符。
+     */
+    public static void writeRawEntry(String key, byte[] raw, java.io.DataOutput out) throws java.io.IOException {
+        if (raw == null || raw.length == 0 || raw[0] == 0) {
+            return;
+        }
+        out.writeByte(raw[0]);
+        out.writeUTF(key);
+        out.write(raw, 1, raw.length - 1);
+    }
+
+    private static volatile java.lang.reflect.Field RAW_KEY_FIELD;
+    private static volatile java.lang.reflect.Field RAW_BYTES_FIELD;
+    private static volatile boolean RAW_FIELDS_MISSING;
+
+    /**
+     * 把 raw 掛到存檔輸出的 CompoundTag 上(template 不能直接參照 splice 進 CompoundTag 的欄位——
+     * 它是對未改寫的 NMS 編譯的——所以由 bootstrap 這邊用反射,欄位物件快取一次)。
+     * 回傳 false = CompoundTag 沒被改寫(passthrough 關閉/transform 失敗)⟹ 呼叫端走舊的解析路徑。
+     */
+    public static boolean attachRaw(Object compoundTag, String key, byte[] raw) {
+        if (RAW_FIELDS_MISSING || compoundTag == null) {
+            return false;
+        }
+        try {
+            java.lang.reflect.Field fk = RAW_KEY_FIELD;
+            java.lang.reflect.Field fb = RAW_BYTES_FIELD;
+            if (fk == null || fb == null) {
+                Class<?> c = compoundTag.getClass();
+                fk = c.getField("lazycontainer$rawKey");
+                fb = c.getField("lazycontainer$rawBytes");
+                RAW_KEY_FIELD = fk;
+                RAW_BYTES_FIELD = fb;
+            }
+            fk.set(compoundTag, key);
+            fb.set(compoundTag, raw);
+            return true;
+        } catch (NoSuchFieldException e) {
+            RAW_FIELDS_MISSING = true;
+            System.err.println("[LazyContainer] passthrough unavailable: CompoundTag not transformed — falling back to parse path");
+            return false;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     // ── 解碼耗時(交付 #223 未結①:冷機谷「還剩多少」要的是秒數,不是次數)──
     /** 物化解碼累計耗時(奈秒)。 */
     public static final java.util.concurrent.atomic.LongAdder decodeNanos = new java.util.concurrent.atomic.LongAdder();
@@ -450,6 +557,7 @@ public final class LazyContainerRuntime {
         return "stash=" + stash.get()
                 + " ensure=" + ensure.get()
                 + " rawSave=" + rawSave.get()
+                + " rawPassthrough=" + rawPassthrough.sum()
                 + " eagerLoad=" + eagerLoad.get()
                 + " summaryFull=" + summaryFull.sum()
                 + " summarySkip=" + summarySkip.sum()

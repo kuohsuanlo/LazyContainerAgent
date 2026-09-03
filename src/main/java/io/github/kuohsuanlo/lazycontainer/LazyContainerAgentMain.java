@@ -98,6 +98,10 @@ public final class LazyContainerAgentMain {
     }
 
     private static void install(Instrumentation inst) {
+        // 先把 Runtime 初始化完再註冊 transformer:transformer 註冊後每個類的定義都會經過 transform(),
+        // 若 Runtime 在那之後才第一次被碰到,它會「透過 transformer 被載入」⟹ ClassCircularityError
+        // (ChunkGuard 26.2-4 / s21 同一個坑;本專案 rig 實測在加 passthrough 分派時踩到)。
+        LazyContainerRuntime.isActive();
         LazyContainerTransformer t = new LazyContainerTransformer();
         boolean ready = t.prepare();    // premain 就把 template 讀好:leaf/hopper 閘門看的是它,不再賭類載入順序
         inst.addTransformer(t, true);
@@ -117,7 +121,9 @@ public final class LazyContainerAgentMain {
                     || n.equals("net.minecraft.world.level.block.entity.ChestBlockEntity")
                     || n.equals("net.minecraft.world.level.block.entity.BarrelBlockEntity")
                     || n.equals("net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity")
-                    || n.equals("net.minecraft.world.level.block.entity.HopperBlockEntity")) {
+                    || n.equals("net.minecraft.world.level.block.entity.HopperBlockEntity")
+                    || n.equals("net.minecraft.nbt.CompoundTag")
+                    || n.equals("net.minecraft.world.level.chunk.LevelChunk")) {
                 try {
                     inst.retransformClasses(c);
                 } catch (Throwable t) {
