@@ -17,3 +17,4 @@ srt/
 # 測試服 log(不入 git)
 logs/
 tools-out/
+__pycache__/
