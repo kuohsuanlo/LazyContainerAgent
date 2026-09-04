@@ -57,6 +57,73 @@ ChunkGuard `inspected=1494 fakeFullBlocked=0 readGuardAlerts=0 inspectErrors=0`(
 2. 26.2 的 overworld 目錄是 `world/dimensions/minecraft/overworld/region/`;放到 `world/region/` 核心不讀、自己生成平地。
 3. 閘門必須同時要求 `stash>0`、`rawPassthrough>0` 且 mca 時間戳被改寫的 chunk ≥ 1000。
 
+## 26.2-4 加固(2026-09-05)
+
+服主的疑慮:「框架寫錯 ⟹ 整個 chunk 讀不回來」聽起來很恐怖,出事能不能救。三道加固:
+
+### (A) 寫入前自檢
+
+掛 bytes 之前做一次零配置 NBT 走訪(`LazyContainerRuntime.rawWellFormedList`):只算長度、不建樹、不跑 codec,
+確認 raw 剛好是一個完整的 ListTag、走完的 offset 等於 `raw.length`。規則逐條對齊 vanilla 讀取端或更嚴:
+
+| 規則 | vanilla | 走訪 |
+|---|---|---|
+| 型別碼 | 1..12,compound 內 0 = END | 同(以無號值判) |
+| 非空清單 elemType | 0 丟 `Missing type on ListTag`;>12 讀元素時丟 | 拒 |
+| 空清單 elemType | 不讀元素,任何值都成功 | 不看 |
+| 清單/陣列長度為負 | `NbtFormatException` / `IllegalArgumentException` | 拒 |
+| `byte[]` / `int[]` 長度 | `checkArgument(len < 2^24)` | 同(**這是唯一曾比 vanilla 寬鬆的地方**) |
+| `long[]` 長度 | 無上限 | 無上限(對齊) |
+| 字串 | `DataInputStream.readUTF` 的 modified-UTF-8 | 逐位元組驗同一組規則 |
+| 巢狀深度 | `NbtAccounter` 512 | 500(更嚴) |
+
+判定快取在方塊實體的 `lazycontainer$rawOk`(0 未判 / 1 合法 / 2 終局拒絕),raw 不可變所以每份只走訪一次——
+否則自動存檔會在同一份 26 MB 的 raw 上反覆做 O(n) 走訪,等於在 tick 執行緒上種一個新的尖峰。
+計數 `rawWalk=` / `rawWalkMaxMs=`。
+
+**變異測試**:18,000 個變異體(翻位元、改位元組、截斷、加尾巴、改 elemType、改長度、塞非法型別),
+走訪接受的 4,563 個**全部**被 vanilla 讀回且剛好讀完(致命方向零違反);抽樣的拒絕案例中 4.3% 是
+vanilla 能讀而走訪拒(無害方向,只是多退回舊路徑)。
+
+### (A′) 壞 bytes 的終局處理
+
+**這是審查抓到的真洞**:26.2 的 `NbtIo` 對格式錯誤丟的是 `RuntimeException`(`NbtFormatException` /
+`NbtAccounterException` / `ReportedNbtException` / `IllegalArgumentException`),不是 `IOException`。
+原本 `trySaveRaw` 與 `ensure` 只 `catch (IOException)`,例外會一路穿出
+`getBlockEntityNbtForSaving` → `SerializableChunkData.copyOf`,被 Moonrise 的 `saveChunk` 記成
+`Failed to save chunk` 後**整個 chunk 這輪不落盤**(同 chunk 其他容器的變更一起沒寫),而且每次
+autosave 重演;`ensure` 那條更會在漏斗 tick 上反覆炸。此洞 26.2-2 起就有,與直寫無關,一併修掉。
+
+現在兩處都 `catch (Throwable)`,並且:標記 `rawOk=2`(終局)、原始 bytes 落檔 `lc-badraw-<座標>-N.bin`、
+印座標一次、`badRaw++`,容器改走 vanilla 編碼。**絕不把已知讀不回的 bytes 寫進 chunk。**
+
+### (B) 直寫的觀測模式 `-Dlazycontainer.passthrough.shadow=true`
+
+磁碟照舊寫解析出來的樹(=26.2-2,安全),另外做一次**真路徑**探針:
+`out.copy()` → `attachRaw` → `NbtIo.write`(真的執行被 ASM 改寫的 `CompoundTag.write`)→ vanilla 讀回 →
+與「解析樹 + 其他欄位」比對 key 集合、結構、串流是否剛好讀完。
+
+審查指出的關鍵設計修正:原本打算在 template 內「重演」prologue 再讀回,那是套套邏輯——真模式獨有的錯誤
+(注入位置錯、prologue 與 map 內同名 key 重複、`copy()` 沒帶欄位)全部落在視野之外。改成走真路徑後,
+這些才看得到。承重的是「不拋例外 + key 集合正確 + 串流剛好讀完」,`equals` 只是附帶的廉價斷言。
+成本控制:raw 超過 512 KB 只計數不做完整讀回(`ptShadowSkipped`);讀回用**有界** accounter(64 MB),
+因為框架若錯位,壞掉的長度欄位可能要求配置數 GB。
+
+### (C) 還原工具 `tools/mca_restore.py`
+
+`verify --deep` / `list` / `restore-chunk` / `restore-items`,純 stdlib。兩個設計重點:
+
+- **只搬位元組**:`restore-items` 找出目標 tag 在解壓後 chunk 資料中的位元組區間,直接換成備份檔的同一段。
+  不重新編碼的理由是 Java 的 modified-UTF-8(`U+0000` 寫成 `C0 80`、增補字元寫成兩個三位元組的代理對)、
+  float NaN 位元樣式、compound key 順序在 Python 重寫時全都會變。
+- **寫入前確認世界沒在跑**:`session.lock` 用 `fcntl.lockf` 試鎖 + 掃 `/proc/*/fd`。Paper 把區域檔的
+  8 KB 檔頭與 sector 點名表快取在記憶體,伺服器在跑時改磁碟檔頭會被整份蓋掉。
+
+實測(真實 s3 `r.1.0.mca`,1024 chunk / 28,370 容器):
+`verify --deep` 全乾淨;切掉某個 54 KB 容器的 Items 再還原 ⟹ Items payload 逐位元組相同、其餘整份相同;
+把 Items 換成空清單再還原 ⟹ 整份解壓內容**逐位元組等於備份**;砸爛整格壓縮資料 ⟹ `verify` 指出該格、
+`restore-chunk` 修好、再驗全乾淨;世界上鎖時寫入被拒、唯讀指令照常。
+
 ## 上線建議
 
 - 先鋪 s45(#261 點名 9 筆)重啟,看 stats 行 `rawPassthrough=` 增長、watchdog 堆疊裡 `lazycontainer$decodeRaw` 出現在存檔路徑的次數應歸零。

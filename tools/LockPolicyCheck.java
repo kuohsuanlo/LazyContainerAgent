@@ -66,7 +66,7 @@ public class LockPolicyCheck {
         ClassNode base = out.get(BASE);
         long fld = base.fields.stream().filter(f -> f.name.startsWith("lazycontainer$")).count();
         long mth = base.methods.stream().filter(m -> m.name.startsWith("lazycontainer$")).count();
-        if (fld == 6 && mth >= 12) ok("base splice: " + fld + " fields + " + mth + " methods");
+        if (fld == 7 && mth >= 12) ok("base splice: " + fld + " fields + " + mth + " methods");
         else fail("base splice 數量異常: " + fld + " fields / " + mth + " methods");
 
         // 呼叫閉包:private 的未同步方法,只要「所有呼叫端都持鎖」即合規(trySaveRaw 就是這型)

@@ -254,10 +254,21 @@ java -Xms8000M -Xmx8000M \
 | `-Dlazycontainer.summary=false` | 關掉「漏斗問滿不滿/這格空不空」的摘要快答(保留延遲解碼本身)。 |
 | `-Dlazycontainer.attribution=false` | 關掉解碼觸發者歸因(stats 行會印 `attribution=off`)。 |
 | `-Dlazycontainer.passthrough=false` | 關掉**存檔直寫**(見下節):未物化的箱子存檔時退回「解成 NBT 樹再交給核心重編碼」的舊路徑。 |
+| `-Dlazycontainer.passthrough.shadow=true` | 直寫的**觀測模式**:磁碟照舊寫解析出的樹(等同關掉直寫),另外把直寫真的做一遍並讀回對帳。上線前跑一天用。 |
 
 ### 存檔直寫(raw passthrough)
 
 沒被碰過的箱子,存檔時不再把暫存的原始 bytes 解成 NBT 樹、再由核心逐節點重新序列化(#261 點名這段是艦隊 5 秒級卡頓的來源之一),而是把 bytes 直接接到核心寫區塊的輸出流:`CompoundTag` 多了一組「原始 Items」欄位,核心呼叫 `write()` 時先把它以標準 named-tag 框架(`[typeId][名稱][payload]`)吐出,其餘欄位照常;`copy()` 會一併帶走。只在核心真正為存檔收集方塊實體 NBT 的視窗(`LevelChunk.getBlockEntityNbtForSaving`)內、非 shadow、且 raw 確實是 ListTag 時啟用,其餘情況一律退回舊路徑;stats 行的 `rawPassthrough=` 計次。輸出與舊路徑**結構相等**(離線用真實 region 檔 A/B 比對過;compound 內 key 順序本來就由 Paper 的雜湊表決定)。
+
+**寫入前自檢**:掛上 bytes 之前先做一次零配置的 NBT 走訪,確認它剛好是一個完整合法的清單、長度分毫不差、字串是合法的 modified-UTF-8。規則逐條對齊伺服器讀取端或更嚴(含 `byte[]`/`int[]` 的 2^24 上限)——比讀取端嚴只會多退回舊路徑,比它寬鬆才會寫出讀不回的區塊。判定快取在方塊實體上(`rawOk`),每份 bytes 只走訪一次,自動存檔不重掃;耗時計在 `rawWalk=` / `rawWalkMaxMs=`。
+
+**萬一 bytes 真的壞了**:走訪拒收、或解析時丟例外,都不會把它寫進區塊。該容器改走原版編碼,原始 bytes 落檔成 `lc-badraw-<座標>-N.bin` 供 `tools/mca_restore.py` 使用,座標印在 log,計在 `badRaw=`(正常恆為 0)。這條很重要:26.2 的 NBT 讀取端對壞資料丟的是 RuntimeException 而不是 IOException,若讓它穿出去,核心會把**整個區塊這輪的存檔丟掉**(同區塊其他容器的變更一起沒寫),而且每次自動存檔重演。
+
+### 出事了怎麼救:`tools/mca_restore.py`
+
+純 Python、不需要伺服器。`verify --deep` 逐格解壓並走完整 NBT,列出壞掉的區塊;`list` 列容器與其 Items 大小;`restore-chunk` 從備份把整格貼回;`restore-items` 只把單一容器的 Items 貼回。
+
+還原一律是**位元組拼接**,不重新編碼:Java 的 NBT 字串是 modified-UTF-8(`U+0000` 與增補字元的寫法和一般 UTF-8 不同),浮點數的 NaN 位元樣式、compound 的 key 順序也都會在重寫時改變——整份重寫等於在每個欄位上重新賭一次。所有寫入前會確認世界的 `session.lock` 沒被鎖住、沒有程序開著那個檔(伺服器在跑時,它記憶體裡的區域檔檔頭會把外部修改整份蓋掉),並先備份目標檔。
 
 **回滾**:刪掉那幾段旗標重啟 → 回 100% vanilla,**不需任何資料遷移**(硬碟格式沒被改過)。
 

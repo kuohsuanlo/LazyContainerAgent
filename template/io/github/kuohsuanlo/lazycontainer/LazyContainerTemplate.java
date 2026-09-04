@@ -119,6 +119,16 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
     /** 滿判定三態:1=證明全滿(每格 count>=maxStackSize)、0=證明不滿、-1=無法證明。 */
     public int lazycontainer$sumFullTri;
 
+    /**
+     * raw 的「存檔直寫」判定快取:0=未判、1=走訪通過(可直寫)、2=走訪拒絕或連 vanilla 都解不開(永遠走 vanilla encode)。
+     * <p>raw 一經 encode 就不再變動(只會整個換掉或設 null),所以走訪是 <b>每個 raw 一次</b>的事;放進欄位是因為
+     * autosave 會在同一份 raw 上反覆呼叫存檔,而走訪是 O(raw.length)——材料站型 26 MB 的容器若每次 autosave 重掃,
+     * 等於在 tick 執行緒上種一個新的(較小的)尖峰,正是 #261 要消滅的那類東西。</p>
+     * <p>值 2 是<b>終局</b>:代表這份 bytes 連 vanilla 讀取端都拒收,絕不可寫進 chunk(會讓整個 chunk 讀不回來)。
+     * 該容器之後一律物化後走 vanilla encode。</p>
+     */
+    public int lazycontainer$rawOk;
+
     /** 永不被呼叫;僅為通過編譯。splice 時不會嫁接 {@code <init>}。 */
     protected LazyContainerTemplate(BlockEntityType<?> type, BlockPos pos, BlockState st) {
         super(type, pos, st);
@@ -140,6 +150,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
      */
     public synchronized void lazycontainer$load(ValueInput input, NonNullList<ItemStack> items) {
         this.lazycontainer$sumState = 0;    // 換了新 raw,舊摘要作廢
+        this.lazycontainer$rawOk = 0;       // 換了新 raw,舊的直寫判定作廢
         if (input instanceof TagValueInput) {
             Tag itemsTag = ((TagValueInput) input).input.get("Items");
             byte[] encoded;
@@ -205,6 +216,55 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
     }
 
     /**
+     * passthrough shadow(26.2-4):<b>真路徑</b>探針。磁碟寫的仍是解析出來的樹(=26.2-2,安全),
+     * 這裡另外做一次「真模式會做的事」並把結果讀回來對帳:
+     * <ol>
+     *   <li>{@code probe = out.copy()} —— 此刻 out 只有 BE 的小欄位(id/x/y/z/Lock/LootTable…),Items 還沒放進去,
+     *       copy 很便宜;{@code copy()} 本身也是被改寫過的方法,順帶驗它有沒有把 raw 欄位帶過去。</li>
+     *   <li>{@code attachRaw(probe, "Items", rawBytes)} —— 掛上 raw(失敗代表真模式也不會啟用,計 unavailable)。</li>
+     *   <li>{@code NbtIo.write(probe, …)} —— <b>真的執行被 ASM 改寫的 CompoundTag.write</b>(注入 prologue + 原本迴圈 + END)。
+     *       這是與「在測試裡重演 prologue」的關鍵差別:注入位置錯、prologue 與 map 內同名 key 重複、
+     *       copy() 沒帶欄位等只有真模式才會發生的錯誤,只有走這條才看得到。</li>
+     *   <li>用 vanilla 讀回,與 {@code expected = out.copy() + put("Items", 解析樹)} 比對,並要求串流剛好讀完。</li>
+     * </ol>
+     * <p>承重的是「不拋例外 + 讀回的 key 集合正確 + 串流剛好讀完」;{@code equals} 是附帶的廉價斷言。
+     * 讀回用<b>有界</b> accounter:框架若錯位,壞掉的長度欄位可能要求配置數 GB,無界會在 tick 執行緒上 OOM。</p>
+     * 純觀測:不影響呼叫端寫出的樹。回傳 ok 供測試斷言。
+     */
+    public static boolean lazycontainer$passthroughShadowCheck(CompoundTag out, byte[] rawBytes, Tag parsed, String pos) {
+        if (rawBytes.length > LazyContainerRuntime.PT_SHADOW_MAX_BYTES) {
+            LazyContainerRuntime.onPassthroughShadowSkipped(pos, rawBytes.length);
+            return true;
+        }
+        try {
+            CompoundTag probe = out.copy();
+            probe.remove("Items");
+            if (!LazyContainerRuntime.attachRaw(probe, "Items", rawBytes)) {
+                LazyContainerRuntime.onPassthroughShadowUnavailable();
+                return true;              // CompoundTag 未被改寫 ⟹ 真模式同樣不會啟用,不是 mismatch
+            }
+            ByteArrayOutputStream bos = new ByteArrayOutputStream(rawBytes.length + 256);
+            DataOutputStream dos = new DataOutputStream(bos);
+            NbtIo.write(probe, dos);      // ← 真的走被改寫的 write
+            byte[] emitted = bos.toByteArray();
+            DataInputStream dis = new DataInputStream(new ByteArrayInputStream(emitted));
+            CompoundTag back = NbtIo.read(dis, NbtAccounter.create(LazyContainerRuntime.PT_SHADOW_READ_BUDGET));
+            int leftover = dis.available();
+            CompoundTag expected = out.copy();
+            expected.put("Items", parsed);
+            boolean sameKeys = back.size() == expected.size() && back.keySet().equals(expected.keySet());
+            boolean ok = sameKeys && leftover == 0 && back.equals(expected);
+            String detail = ok ? "" : ("backKeys=" + back.keySet() + " expectedKeys=" + expected.keySet()
+                    + " leftover=" + leftover + " equal=" + back.equals(expected) + " rawLen=" + rawBytes.length);
+            LazyContainerRuntime.onPassthroughShadow(ok, pos, detail);
+            return ok;
+        } catch (Throwable t) {
+            LazyContainerRuntime.onPassthroughShadow(false, pos, "probe threw " + t);
+            return false;
+        }
+    }
+
+    /**
      * 首次被任何存取點觸發時,把暫存的 raw 解碼進真正的 items 清單。<b>填完再翻旗標</b>(26.2-2)。
      *
      * <h4>為什麼舊版「先清旗標再填」在 EndRod 上不是「既有設計邊界」</h4>
@@ -267,10 +327,18 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                     }
                     Tag raw;
                     try {
-                        raw = lazycontainer$decodeRaw(rawBytes);    // bytes → Tag(自家 encode 的往返,失敗即拋)
-                    } catch (java.io.IOException io) {
-                        // decode 自家 bytes 失敗(現實上不可達):pending 未翻、raw 仍在,下次重試,絕不靜默丟失
-                        throw new IllegalStateException("lazycontainer raw decode failed", io);
+                        raw = lazycontainer$decodeRaw(rawBytes);    // bytes → Tag(自家 encode 的往返)
+                    } catch (Throwable t) {
+                        // decode 自家 bytes 失敗(現實上不可達:raw 是我們自己從一棵已解析的樹 encode 出來的)。
+                        // 26.2 的 NbtIo 對壞 bytes 丟 RuntimeException 而非 IOException;若讓它傳出去,
+                        // 每次漏斗/玩家碰這個容器都會炸一次(getItems 在 tick 熱路徑),形同永久炸彈。
+                        // 改為:落檔保存原始 bytes + 印座標一次 + 標記終局(rawOk=2)+ 作廢 raw,
+                        // 容器維持目前清單(空),之後一律走 vanilla 路徑。資料靠備份/工具救,不再擴大災情。
+                        this.lazycontainer$rawOk = 2;
+                        LazyContainerRuntime.onBadRaw(String.valueOf(this.getBlockPos()), rawBytes, "ensure decode threw " + t);
+                        this.lazycontainer$raw = null;
+                        this.lazycontainer$pending = false;
+                        return;
                     }
                     CompoundTag tmp = new CompoundTag();
                     tmp.put("Items", raw);
@@ -361,23 +429,52 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         // 只在 LevelChunk.getBlockEntityNbtForSaving 內(per-thread 旗標)且非 shadow;
         // 其他呼叫者(/data、structure、getState、封包)會「讀」輸出樹,必須照舊給它們一棵真的樹。
         // allowEmpty==false(shulker)遇空清單 vanilla 會 discard "Items",空與否不解析就能從 payload 判(見 Runtime)。
+        boolean ptShadow = false;
         if (LazyContainerRuntime.passthrough() && LazyContainerRuntime.inChunkSave() && !LazyContainerRuntime.shadow()
+                && this.lazycontainer$rawOk != 2
                 && LazyContainerRuntime.rawIsListTag(rawBytes)
                 && (allowEmpty || !LazyContainerRuntime.rawListIsEmpty(rawBytes))) {
-            CompoundTag pt = ((TagValueOutput) output).buildResult();
-            pt.remove("Items");                                             // 防呆:同 key 不得同時存在於 map 與 raw
-            if (LazyContainerRuntime.attachRaw(pt, "Items", rawBytes)) {
-                LazyContainerRuntime.onRawSave();
-                LazyContainerRuntime.onRawPassthrough();
-                return true;
+            // 寫入前自檢(26.2-4):零配置走訪確認 raw 剛好是一個完整合法的 ListTag。
+            // 判定快取在 lazycontainer$rawOk:raw 不可變,所以每份 raw 只走訪一次(autosave 反覆存檔不重掃)。
+            if (this.lazycontainer$rawOk == 0) {
+                long t0 = System.nanoTime();
+                boolean wellFormed = LazyContainerRuntime.rawWellFormedList(rawBytes);
+                LazyContainerRuntime.onRawWalk(System.nanoTime() - t0);
+                this.lazycontainer$rawOk = wellFormed ? 1 : 2;
+                if (!wellFormed) {
+                    // 這份 bytes 連 vanilla 讀取端都會拒收 ⟹ 絕不寫進 chunk(會讓整個 chunk 讀不回來)。
+                    // 落檔 + 印座標,之後這個容器永遠走 vanilla encode。
+                    LazyContainerRuntime.onBadRaw(String.valueOf(this.getBlockPos()), rawBytes, "self-check rejected");
+                }
             }
-            // attach 失敗(CompoundTag 未被改寫)⟹ 落回下面的解析路徑,行為與 26.2-2 完全相同
+            if (this.lazycontainer$rawOk == 1) {
+                if (LazyContainerRuntime.passthroughShadow()) {
+                    // passthrough shadow:磁碟照舊寫解析出的樹(下面那條路),直寫只做一次「真路徑」探針比對。
+                    ptShadow = true;
+                } else {
+                    CompoundTag pt = ((TagValueOutput) output).buildResult();
+                    pt.remove("Items");                                     // 防呆:同 key 不得同時存在於 map 與 raw
+                    if (LazyContainerRuntime.attachRaw(pt, "Items", rawBytes)) {
+                        LazyContainerRuntime.onRawSave();
+                        LazyContainerRuntime.onRawPassthrough();
+                        return true;
+                    }
+                    // attach 失敗(CompoundTag 未被改寫)⟹ 落回下面的解析路徑,行為與 26.2-2 完全相同
+                }
+            }
         }
         Tag raw;
         try {
             raw = lazycontainer$decodeRaw(rawBytes);    // 每次存檔 parse 一棵**全新的私有樹**(取代舊版的 raw.copy())
-        } catch (java.io.IOException io) {
-            this.lazycontainer$ensure();                // 自家 bytes 解不開(不可達):退回正常 encode,不掉資料
+        } catch (Throwable t) {
+            // 26.2 的 NbtIo 對壞 bytes 丟的是 RuntimeException(NbtFormatException / NbtAccounterException /
+            // ReportedNbtException / IllegalArgumentException),不是 IOException——只接 IOException 會讓例外一路穿出
+            // getBlockEntityNbtForSaving → SerializableChunkData.copyOf,被 Moonrise 的 saveChunk 記成
+            // "Failed to save chunk" 後**整個 chunk 這輪不落盤**(其他容器的變更一起沒寫)。所以這裡接 Throwable。
+            this.lazycontainer$rawOk = 2;
+            LazyContainerRuntime.onBadRaw(String.valueOf(this.getBlockPos()), rawBytes, "decode threw " + t);
+            this.lazycontainer$raw = null;              // 讓 ensure 走 no-op 物化:清單維持現狀(空),不再重試解這份壞 bytes
+            this.lazycontainer$ensure();
             return false;
         }
         // 只在 raw 為「真正的 ListTag」時走快路徑;且 allowEmpty==false(shulker)遇空清單不可寫 raw
@@ -390,6 +487,10 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
             return false;
         }
         CompoundTag out = ((TagValueOutput) output).buildResult();
+        if (ptShadow) {
+            // passthrough shadow(純觀測):真路徑探針(copy→attachRaw→被改寫的 write→讀回對帳);磁碟寫的仍是下面的 raw 樹。
+            lazycontainer$passthroughShadowCheck(out, rawBytes, raw, String.valueOf(this.getBlockPos()));
+        }
         if (LazyContainerRuntime.shadow()) {
             // shadow 是「純觀測」模式:偵測並回報 raw 與 vanilla 重新編碼的差異,但**絕不改寫玩家資料**。
             // 設計原則(服主要求):寫回磁碟的必須是讀進來的那份原始資料,不做任何正規化(count:1 等明確

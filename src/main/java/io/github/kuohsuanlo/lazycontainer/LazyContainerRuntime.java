@@ -298,6 +298,283 @@ public final class LazyContainerRuntime {
         }
     }
 
+    // ── passthrough 寫入前自檢 + passthrough shadow ─────────────────────────────────────
+    //
+    // 服主的最壞情況=框架寫錯 ⟹ 該 chunk 整份讀不回來。直寫的框架是固定三條指令,跟資料無關;唯一跟資料相關的是
+    // raw 陣列本身。這裡在「真的把 raw 掛上輸出」之前做一次零配置的 NBT 走訪:確認 raw 剛好是一個完整的 ListTag、
+    // 長度分毫不差、字串是合法的 modified-UTF-8。走訪只算長度、不建樹、不跑 codec。任何不合法 ⟹ 退回舊的解析路徑
+    // (那條會真的用 NbtIo 解,解不開就 ensure 走正常 encode,不掉資料)。走訪「比 vanilla 嚴格」只會多退回,無害;
+    // 「比 vanilla 寬鬆」才危險,所以每條規則都取 vanilla 讀取端的同款或更嚴的版本。
+
+    /** {@code -Dlazycontainer.passthrough.shadow=true}:磁碟照舊寫解析出的樹(=26.2-2),直寫結果只寫進暫存緩衝、讀回來比對。 */
+    private static final boolean PASSTHROUGH_SHADOW = Boolean.getBoolean("lazycontainer.passthrough.shadow");
+
+    public static boolean passthroughShadow() {
+        return PASSTHROUGH_SHADOW;
+    }
+
+    /** 自檢拒絕(raw 不是一個完整合法的 ListTag)⟹ 走解析路徑;正常應恆為 0。 */
+    public static final java.util.concurrent.atomic.LongAdder rawWalkReject = new java.util.concurrent.atomic.LongAdder();
+    /** passthrough shadow:模擬直寫 → 讀回 → 與解析樹結構相等。 */
+    public static final java.util.concurrent.atomic.LongAdder ptShadowOk = new java.util.concurrent.atomic.LongAdder();
+    /** passthrough shadow:讀回結果與解析樹不同(磁碟寫的是樹,安全);正常應恆為 0。 */
+    public static final java.util.concurrent.atomic.LongAdder ptShadowMismatch = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.AtomicInteger rawWalkLogN = new java.util.concurrent.atomic.AtomicInteger();
+    private static final java.util.concurrent.atomic.AtomicInteger ptShadowLogN = new java.util.concurrent.atomic.AtomicInteger();
+
+    /** 走訪次數與耗時(每份 raw 只走一次,結果快取在 BE 的 lazycontainer$rawOk)。 */
+    public static final java.util.concurrent.atomic.LongAdder rawWalk = new java.util.concurrent.atomic.LongAdder();
+    public static final java.util.concurrent.atomic.LongAdder rawWalkNanos = new java.util.concurrent.atomic.LongAdder();
+    public static final AtomicLong rawWalkMaxNanos = new AtomicLong();
+    /** shadow:raw 太大而跳過完整讀回。 */
+    public static final java.util.concurrent.atomic.LongAdder ptShadowSkipped = new java.util.concurrent.atomic.LongAdder();
+    /** shadow:CompoundTag 未被改寫(真模式同樣不會啟用)。 */
+    public static final java.util.concurrent.atomic.LongAdder ptShadowUnavailable = new java.util.concurrent.atomic.LongAdder();
+    /** raw 連 vanilla 讀取端都拒收(絕不寫進 chunk);正常應恆為 0。 */
+    public static final java.util.concurrent.atomic.LongAdder badRaw = new java.util.concurrent.atomic.LongAdder();
+
+    /** shadow 完整讀回的大小上限(超過只計數):避免在 tick 執行緒上為單一巨型容器多做一次完整解析。 */
+    public static final int PT_SHADOW_MAX_BYTES = Integer.getInteger("lazycontainer.passthrough.shadow.maxBytes", 512 * 1024);
+    /** shadow 讀回的 accounter 預算(有界:框架若錯位,壞掉的長度欄位可能要求配置數 GB)。 */
+    public static final long PT_SHADOW_READ_BUDGET = 64L << 20;
+
+    public static void onRawWalk(long nanos) {
+        rawWalk.increment();
+        rawWalkNanos.add(nanos);
+        long prev = rawWalkMaxNanos.get();
+        while (nanos > prev && !rawWalkMaxNanos.compareAndSet(prev, nanos)) {
+            prev = rawWalkMaxNanos.get();
+        }
+    }
+
+    private static final java.util.concurrent.atomic.AtomicInteger badRawDumpN = new java.util.concurrent.atomic.AtomicInteger();
+
+    /**
+     * raw 被判定為「vanilla 讀取端不會接受」——這份 bytes 絕不能寫進 chunk(會讓整個 chunk 讀不回來)。
+     * 落檔保存原始 bytes(給 tools/mca_restore.py 用)+ 印座標;呼叫端負責讓該容器改走 vanilla encode。
+     * 現實上不可達:raw 是我們自己從一棵已解析的樹 encode 出來的。
+     */
+    public static void onBadRaw(String pos, byte[] raw, String why) {
+        badRaw.increment();
+        rawWalkReject.increment();
+        if (rawWalkLogN.incrementAndGet() <= 30) {
+            System.err.println("[LazyContainer] BAD RAW @ " + pos + " (" + (raw == null ? 0 : raw.length)
+                    + " bytes) — " + why + " — this container falls back to vanilla encode; bytes dumped for recovery");
+        }
+        if (raw == null || badRawDumpN.incrementAndGet() > 30) {
+            return;
+        }
+        try {
+            String safe = pos.replaceAll("[^0-9A-Za-z_-]+", "_");
+            java.io.File f = new java.io.File(System.getProperty("lazycontainer.dump.dir", "."),
+                    "lc-badraw-" + safe + "-" + badRawDumpN.get() + ".bin");
+            java.io.FileOutputStream os = new java.io.FileOutputStream(f);
+            try {
+                os.write(raw);
+            } finally {
+                os.close();
+            }
+            System.err.println("[LazyContainer] BAD RAW bytes written to " + f.getAbsolutePath());
+        } catch (Throwable t) {
+            System.err.println("[LazyContainer] BAD RAW dump failed: " + t);
+        }
+    }
+
+    public static void onPassthroughShadowSkipped(String pos, int len) {
+        ptShadowSkipped.increment();
+        if (ptShadowLogN.incrementAndGet() <= 30) {
+            System.err.println("[LazyContainer] passthrough shadow skipped (raw " + len + " bytes > "
+                    + PT_SHADOW_MAX_BYTES + ") @ " + pos);
+        }
+    }
+
+    public static void onPassthroughShadowUnavailable() {
+        ptShadowUnavailable.increment();
+    }
+
+    public static void onPassthroughShadow(boolean ok, String pos, String detail) {
+        if (ok) {
+            ptShadowOk.increment();
+            return;
+        }
+        ptShadowMismatch.increment();
+        if (ptShadowLogN.incrementAndGet() <= 30) {
+            System.err.println("[LazyContainer] PASSTHROUGH shadow MISMATCH @ " + pos + " — " + detail
+                    + " — disk got the parsed tree (safe)");
+        }
+    }
+
+    /** 走訪深度上限:vanilla NbtAccounter 是 512;這裡取更嚴的 500(嚴格方向只會多退回)。 */
+    private static final int WALK_MAX_DEPTH = 500;
+
+    /**
+     * 零配置 NBT 走訪:raw 必須剛好是「一個完整的 ListTag」({@code NbtIo.writeAnyTag} 框架 [9][elemType][int32 n][elements]),
+     * 走完的 offset 必須等於 {@code raw.length}(不多不少)。規則逐條對齊 vanilla 讀取端(ListTag/CompoundTag 的 load、
+     * DataInputStream.readUTF)或更嚴:
+     * <ul>
+     *   <li>型別碼 1..12;compound 內 0 = END。非空清單的 elemType 為 0 或 &gt;12 ⟹ 拒(vanilla:0 丟 "Missing type on ListTag",
+     *       &gt;12 在讀第一個元素時丟例外);空清單(n==0)不看 elemType(vanilla 也不讀任何元素)。</li>
+     *   <li>int32 長度(byte/int/long 陣列、清單)為負 ⟹ 拒(vanilla 會丟 NegativeArraySize/accounter 例外)。</li>
+     *   <li>字串:uint16 長度 + modified-UTF-8,逐位元組驗 {@code readUTF} 的規則(單 byte 0x01..0x7F;0xC0..0xDF + 1 續;
+     *       0xE0..0xEF + 2 續;續位元組必為 10xxxxxx;其餘一律拒)。</li>
+     *   <li>巢狀深度 &gt; 500 ⟹ 拒。</li>
+     * </ul>
+     */
+    public static boolean rawWellFormedList(byte[] raw) {
+        if (raw == null || raw.length < 6 || raw[0] != 9) {
+            return false;
+        }
+        try {
+            long end = walkPayload(raw, 1L, 9, 1);
+            return end == raw.length;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** 回傳 payload 結束後的 offset;任何不合法 ⟹ -1。所有 offset 用 long 算,避免 int32 長度相加溢位。 */
+    private static long walkPayload(byte[] b, long off, int type, int depth) {
+        if (off < 0 || off > b.length) {
+            return -1;
+        }
+        switch (type) {
+            case 1:
+                return fixed(b, off, 1);
+            case 2:
+                return fixed(b, off, 2);
+            case 3:
+            case 5:
+                return fixed(b, off, 4);
+            case 4:
+            case 6:
+                return fixed(b, off, 8);
+            // vanilla 對 byte[] 與 int[] 另有 Preconditions.checkArgument(len < 16777216)(2^24),long[] 沒有——
+            // 這是規則集裡唯一「走訪可能比 vanilla 寬鬆」的地方,必須補上,否則走訪接受的 bytes 讀取端會拒。
+            case 7:
+                return sized(b, off, 1L, 1 << 24);
+            case 11:
+                return sized(b, off, 4L, 1 << 24);
+            case 12:
+                return sized(b, off, 8L, Integer.MAX_VALUE);
+            case 8:
+                return string(b, off);
+            case 9: {
+                if (depth > WALK_MAX_DEPTH) {
+                    return -1;
+                }
+                if (off + 5 > b.length) {
+                    return -1;
+                }
+                int et = b[(int) off] & 0xFF;
+                long n = int32(b, off + 1);
+                if (n < 0) {
+                    return -1;
+                }
+                long p = off + 5;
+                if (n == 0) {
+                    return p;
+                }
+                if (et == 0 || et > 12) {
+                    return -1;
+                }
+                for (long i = 0; i < n; i++) {
+                    p = walkPayload(b, p, et, depth + 1);
+                    if (p < 0) {
+                        return -1;
+                    }
+                }
+                return p;
+            }
+            case 10: {
+                if (depth > WALK_MAX_DEPTH) {
+                    return -1;
+                }
+                long p = off;
+                while (true) {
+                    if (p >= b.length) {
+                        return -1;
+                    }
+                    int t = b[(int) p] & 0xFF;
+                    p++;
+                    if (t == 0) {
+                        return p;
+                    }
+                    if (t > 12) {
+                        return -1;
+                    }
+                    p = string(b, p);
+                    if (p < 0) {
+                        return -1;
+                    }
+                    p = walkPayload(b, p, t, depth + 1);
+                    if (p < 0) {
+                        return -1;
+                    }
+                }
+            }
+            default:
+                return -1;
+        }
+    }
+
+    private static long fixed(byte[] b, long off, int size) {
+        long e = off + size;
+        return e <= b.length ? e : -1;
+    }
+
+    /** [int32 n][n × elem];n 為負或 ≥ maxLen ⟹ 拒(maxLen 對齊 vanilla 的 checkArgument)。 */
+    private static long sized(byte[] b, long off, long elem, long maxLen) {
+        long n = int32(b, off);
+        if (n < 0 || n >= maxLen) {
+            return -1;
+        }
+        long e = off + 4 + n * elem;
+        return e <= b.length ? e : -1;
+    }
+
+    /** 回傳 int32(signed);讀不到 ⟹ -1(呼叫端把負值一律當不合法)。 */
+    private static long int32(byte[] b, long off) {
+        if (off + 4 > b.length) {
+            return -1;
+        }
+        int i = (int) off;
+        return ((b[i] & 0xFF) << 24) | ((b[i + 1] & 0xFF) << 16) | ((b[i + 2] & 0xFF) << 8) | (b[i + 3] & 0xFF);
+    }
+
+    /** [uint16 n][n bytes modified-UTF-8],逐位元組驗 readUTF 規則。 */
+    private static long string(byte[] b, long off) {
+        if (off + 2 > b.length) {
+            return -1;
+        }
+        int n = ((b[(int) off] & 0xFF) << 8) | (b[(int) off + 1] & 0xFF);
+        long s = off + 2;
+        long e = s + n;
+        if (e > b.length) {
+            return -1;
+        }
+        int i = (int) s;
+        int end = (int) e;
+        while (i < end) {
+            int c = b[i] & 0xFF;
+            if (c >= 0x01 && c <= 0x7F) {
+                i++;
+            } else if (c >= 0xC0 && c <= 0xDF) {
+                if (i + 1 >= end || (b[i + 1] & 0xC0) != 0x80) {
+                    return -1;
+                }
+                i += 2;
+            } else if (c >= 0xE0 && c <= 0xEF) {
+                if (i + 2 >= end || (b[i + 1] & 0xC0) != 0x80 || (b[i + 2] & 0xC0) != 0x80) {
+                    return -1;
+                }
+                i += 3;
+            } else {
+                return -1;   // 0x00、0x80..0xBF、0xF0..0xFF:readUTF 一律丟 UTFDataFormatException
+            }
+        }
+        return e;
+    }
+
     // ── 解碼耗時(交付 #223 未結①:冷機谷「還剩多少」要的是秒數,不是次數)──
     /** 物化解碼累計耗時(奈秒)。 */
     public static final java.util.concurrent.atomic.LongAdder decodeNanos = new java.util.concurrent.atomic.LongAdder();
@@ -558,6 +835,14 @@ public final class LazyContainerRuntime {
                 + " ensure=" + ensure.get()
                 + " rawSave=" + rawSave.get()
                 + " rawPassthrough=" + rawPassthrough.sum()
+                + " rawWalk=" + rawWalk.sum()
+                + " rawWalkMaxMs=" + (rawWalkMaxNanos.get() / 1_000_000L)
+                + " badRaw=" + badRaw.sum()
+                + (PASSTHROUGH_SHADOW
+                        ? " ptShadowOk=" + ptShadowOk.sum() + " ptShadowMismatch=" + ptShadowMismatch.sum()
+                            + " ptShadowSkipped=" + ptShadowSkipped.sum()
+                            + " ptShadowUnavailable=" + ptShadowUnavailable.sum()
+                        : "")
                 + " eagerLoad=" + eagerLoad.get()
                 + " summaryFull=" + summaryFull.sum()
                 + " summarySkip=" + summarySkip.sum()
