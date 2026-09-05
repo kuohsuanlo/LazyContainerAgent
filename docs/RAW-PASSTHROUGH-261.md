@@ -124,6 +124,18 @@ autosave 重演;`ensure` 那條更會在漏斗 tick 上反覆炸。此洞 26.2-2
 把 Items 換成空清單再還原 ⟹ 整份解壓內容**逐位元組等於備份**;砸爛整格壓縮資料 ⟹ `verify` 指出該格、
 `restore-chunk` 修好、再驗全乾淨;世界上鎖時寫入被拒、唯讀指令照常。
 
+### 面板整合(26.2-5)
+
+`[LazyContainer] BAD RAW` 這一行現在印成 `minecraft:<dim> chunk (cx, cz) block x, y, z …`,格式對齊面板
+`tps-viz/web/chunkguard.py` 的 `DIM_RE` / `CH_RE1`;面板端(commit `1c5acae`)把它加進觸發字串,與核心的
+`chunk data will be lost` 同等待遇:凍結 region、建案、`verdict_detail` 前綴標明「容器 bytes 讀不回、已退回原版編碼,
+用 mca_restore.py restore-items 從備份貼回」。營運成本為零——偵測器本來就每 60 秒 grep 同一批 log,多一個 pattern 而已;
+真的命中才會凍結建案,而 `badRaw` 正常恆為 0。
+
+面板看得到 / 看不到什麼:整格讀不回(核心印 `chunk data will be lost`)本來就會建案;單一容器 Items 錯而 chunk 正常
+(log 無聲、尺寸不變)面板看不到,26.2-5 起靠 BAD RAW 行補上;26.2-4 修掉的「壞 bytes 讓整個 chunk 不落盤」
+核心印的是 `Failed to save chunk`,不在面板關鍵字裡,以前也看不到。
+
 ## 上線建議
 
 - 先鋪 s45(#261 點名 9 筆)重啟,看 stats 行 `rawPassthrough=` 增長、watchdog 堆疊裡 `lazycontainer$decodeRaw` 出現在存檔路徑的次數應歸零。

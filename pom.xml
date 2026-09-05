@@ -6,7 +6,7 @@
 
     <groupId>io.github.kuohsuanlo</groupId>
     <artifactId>LazyContainerAgent</artifactId>
-    <version>26.2-4</version>
+    <version>26.2-5</version>
     <packaging>jar</packaging>
     <name>LazyContainerAgent</name>
     <description>Lazy container item deserialization / skip-clean-save for plain Paper via a Java agent</description>

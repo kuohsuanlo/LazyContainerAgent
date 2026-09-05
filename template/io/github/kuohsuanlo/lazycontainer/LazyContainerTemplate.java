@@ -195,6 +195,23 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         LazyContainerRuntime.onEagerLoad();
     }
 
+    /**
+     * log 用座標:「minecraft:&lt;dim&gt; chunk (cx, cz) block x, y, z」。
+     * 格式刻意對齊面板 chunkguard.py 的 DIM_RE / CH_RE1,讓「BAD RAW」能像核心的 chunk data will be lost 一樣被建案。
+     */
+    private String lazycontainer$posForLog() {
+        BlockPos p = this.getBlockPos();
+        String dim = "world=?";
+        try {
+            if (this.level != null) {
+                dim = String.valueOf(this.level.dimension().identifier());
+            }
+        } catch (Throwable t) {
+            // 觀測失敗不影響主流程
+        }
+        return dim + " chunk (" + (p.getX() >> 4) + ", " + (p.getZ() >> 4) + ") block " + p.toShortString();
+    }
+
     /** Tag → NBT 二進位({@code NbtIo.writeAnyTag} 框架);null 進 null 出。 */
     public static byte[] lazycontainer$encodeRaw(Tag tag) throws java.io.IOException {
         if (tag == null) {
@@ -335,7 +352,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                         // 改為:落檔保存原始 bytes + 印座標一次 + 標記終局(rawOk=2)+ 作廢 raw,
                         // 容器維持目前清單(空),之後一律走 vanilla 路徑。資料靠備份/工具救,不再擴大災情。
                         this.lazycontainer$rawOk = 2;
-                        LazyContainerRuntime.onBadRaw(String.valueOf(this.getBlockPos()), rawBytes, "ensure decode threw " + t);
+                        LazyContainerRuntime.onBadRaw(this.lazycontainer$posForLog(), rawBytes, "ensure decode threw " + t);
                         this.lazycontainer$raw = null;
                         this.lazycontainer$pending = false;
                         return;
@@ -444,7 +461,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                 if (!wellFormed) {
                     // 這份 bytes 連 vanilla 讀取端都會拒收 ⟹ 絕不寫進 chunk(會讓整個 chunk 讀不回來)。
                     // 落檔 + 印座標,之後這個容器永遠走 vanilla encode。
-                    LazyContainerRuntime.onBadRaw(String.valueOf(this.getBlockPos()), rawBytes, "self-check rejected");
+                    LazyContainerRuntime.onBadRaw(this.lazycontainer$posForLog(), rawBytes, "self-check rejected");
                 }
             }
             if (this.lazycontainer$rawOk == 1) {
@@ -472,7 +489,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
             // getBlockEntityNbtForSaving → SerializableChunkData.copyOf,被 Moonrise 的 saveChunk 記成
             // "Failed to save chunk" 後**整個 chunk 這輪不落盤**(其他容器的變更一起沒寫)。所以這裡接 Throwable。
             this.lazycontainer$rawOk = 2;
-            LazyContainerRuntime.onBadRaw(String.valueOf(this.getBlockPos()), rawBytes, "decode threw " + t);
+            LazyContainerRuntime.onBadRaw(this.lazycontainer$posForLog(), rawBytes, "decode threw " + t);
             this.lazycontainer$raw = null;              // 讓 ensure 走 no-op 物化:清單維持現狀(空),不再重試解這份壞 bytes
             this.lazycontainer$ensure();
             return false;
