@@ -1,5 +1,11 @@
 # 自己測試 LazyContainerAgent
 
+> **出貨前的正式驗收不是這一份,是 [`gates/README.md`](gates/README.md)。**
+> `bash gates/run.sh` 會把每一項優化各自的關卡跑一遍(G0…G8),全綠才准出貨;
+> 換版(26.2 → 26.3 → …)照 [`gates/UPGRADE.md`](gates/UPGRADE.md)。
+> 這一份留給「開發中想手動玩玩看」的情境。
+
+
 ## 0) 先跑離線單元/併發測試(最快、不用開服)
 
 ```bash
@@ -68,14 +74,14 @@ cd .lctest && bash play.sh /tmp/realworld-copy
 ```
 -javaagent:/abs/path/LazyContainerAgent.jar -Dlazycontainer.shadow=true -Dlazycontainer.verbose=true
 ```
-開機 log 應出現 `spliced 6 fields + 18 methods`(splice=把 agent 的欄位/方法接進原版類別裡)+ 三個 `transformed leaf`(被改寫的目標類別)。
+開機 log 應出現 `spliced 7 fields + 21 methods`(26.2-6;數字會跟著 template 變)(splice=把 agent 的欄位/方法接進原版類別裡)+ 三個 `transformed leaf`(被改寫的目標類別)。
 **splice 的數字必須跟著 `template/` 變**:transformer 是按 `lazycontainer$` 前綴掃 template 成員、不是寫死清單,
-所以改了 template 卻沒看到數字變 = template 沒重新編進 jar(`build.sh` 第 2、3 步)。26.2-2 的 fields 從 5 變 6
-(新增 `lazycontainer$ensuring`)。**先確認備份到位。**
+所以改了 template 卻沒看到數字變 = template 沒重新編進 jar(`build.sh` 第 2、3 步)。26.2-2 的 fields 從 5 變 6(新增 `lazycontainer$ensuring`)、26.2-4 再變 7(新增 `lazycontainer$rawOk`)。
+出貨 gate 的 `gates/versions/<版本>.env` 有 `LC_SPLICE_FIELDS/METHODS`,改 template 之後要一起更新。**先確認備份到位。**
 跑數天看 `shadowMismatch=0` + 無玩家回報少東西 → 才考慮關 shadow 拿效能。
 **回滾**:拔掉那段旗標重啟即回 100% vanilla,不需任何資料遷移(磁碟格式從未改變)。
 
-> ⚠️ 版本綁 1.21.11/Java21。版本不符會在開機/第一次載箱子時**大聲報錯**(VerifyError/NoSuchMethod),不會靜默毀資料,但別硬上。
+> ⚠️ 版本綁 Paper 26.2 / Java 25。版本不符會在開機/第一次載箱子時**大聲報錯**(VerifyError/NoSuchMethod),不會靜默毀資料,但別硬上。
 
 ## 6) 用真 client bot 測「玩家開箱」這條路徑
 

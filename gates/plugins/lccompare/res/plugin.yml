@@ -1,0 +1,6 @@
+name: LcCompare
+version: 1.0
+main: lc.compare.LcComparePlugin
+api-version: '1.21'
+paperweight-mappings-namespace: mojang
+description: LazyContainer 測試裁判——兩份 mca 逐容器逐格 ItemStack.matches

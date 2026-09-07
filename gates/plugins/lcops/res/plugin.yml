@@ -1,0 +1,6 @@
+name: LcOps
+version: 1.0
+main: lc.ops.LcOpsPlugin
+api-version: '1.21'
+description: LazyContainer 測試——外掛面 Bukkit API 操作(getState/update、setContents、clear)
+paperweight-mappings-namespace: mojang

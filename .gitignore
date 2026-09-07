@@ -18,3 +18,8 @@ srt/
 logs/
 tools-out/
 __pycache__/
+
+# gate 產物(重、含正式站素材副本)
+gates/out/
+gates/plugins/*/out/
+gates/plugins/*/*.jar

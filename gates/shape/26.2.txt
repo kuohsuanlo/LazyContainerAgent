@@ -1,0 +1,112 @@
+# LazyContainerAgent 注入形狀基準 —— Paper 26.2 (paper-26.2-mojmap.jar)
+# 由 tools/InjectionShapeCheck.java 產生。換版時重跑並逐行審查 diff,確認安全後才更新本檔。
+CALLER-BE-NBT net/minecraft/world/level/chunk/ImposterProtoChunk#getBlockEntityNbtForSaving(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/CompoundTag; (owner net/minecraft/world/level/chunk/LevelChunk)
+CALLER-BE-NBT net/minecraft/world/level/chunk/storage/SerializableChunkData#copyOf(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/level/chunk/ChunkAccess;)Lnet/minecraft/world/level/chunk/storage/SerializableChunkData; (owner net/minecraft/world/level/chunk/ChunkAccess)
+CHCALL net/minecraft/world/ContainerHelper#saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;)V -> saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;Z)V
+CHCALL net/minecraft/world/entity/vehicle/ContainerEntity#addChestVehicleSaveData(Lnet/minecraft/world/level/storage/ValueOutput;)V -> saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/entity/vehicle/ContainerEntity#readChestVehicleSaveData(Lnet/minecraft/world/level/storage/ValueInput;)V -> loadAllItems(Lnet/minecraft/world/level/storage/ValueInput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/AbstractFurnaceBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V -> loadAllItems(Lnet/minecraft/world/level/storage/ValueInput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/AbstractFurnaceBlockEntity#saveAdditional(Lnet/minecraft/world/level/storage/ValueOutput;)V -> saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/BarrelBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V -> loadAllItems(Lnet/minecraft/world/level/storage/ValueInput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/BarrelBlockEntity#saveAdditional(Lnet/minecraft/world/level/storage/ValueOutput;)V -> saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/BrewingStandBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V -> loadAllItems(Lnet/minecraft/world/level/storage/ValueInput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/BrewingStandBlockEntity#saveAdditional(Lnet/minecraft/world/level/storage/ValueOutput;)V -> saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/CampfireBlockEntity#getUpdateTag(Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/CompoundTag; -> saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;Z)V
+CHCALL net/minecraft/world/level/block/entity/CampfireBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V -> loadAllItems(Lnet/minecraft/world/level/storage/ValueInput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/CampfireBlockEntity#saveAdditional(Lnet/minecraft/world/level/storage/ValueOutput;)V -> saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;Z)V
+CHCALL net/minecraft/world/level/block/entity/ChestBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V -> loadAllItems(Lnet/minecraft/world/level/storage/ValueInput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/ChestBlockEntity#saveAdditional(Lnet/minecraft/world/level/storage/ValueOutput;)V -> saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/ChiseledBookShelfBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V -> loadAllItems(Lnet/minecraft/world/level/storage/ValueInput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/ChiseledBookShelfBlockEntity#saveAdditional(Lnet/minecraft/world/level/storage/ValueOutput;)V -> saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;Z)V
+CHCALL net/minecraft/world/level/block/entity/CrafterBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V -> loadAllItems(Lnet/minecraft/world/level/storage/ValueInput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/CrafterBlockEntity#saveAdditional(Lnet/minecraft/world/level/storage/ValueOutput;)V -> saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/DispenserBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V -> loadAllItems(Lnet/minecraft/world/level/storage/ValueInput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/DispenserBlockEntity#saveAdditional(Lnet/minecraft/world/level/storage/ValueOutput;)V -> saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/HopperBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V -> loadAllItems(Lnet/minecraft/world/level/storage/ValueInput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/HopperBlockEntity#saveAdditional(Lnet/minecraft/world/level/storage/ValueOutput;)V -> saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/ShelfBlockEntity#getUpdateTag(Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/CompoundTag; -> saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;Z)V
+CHCALL net/minecraft/world/level/block/entity/ShelfBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V -> loadAllItems(Lnet/minecraft/world/level/storage/ValueInput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/ShelfBlockEntity#saveAdditional(Lnet/minecraft/world/level/storage/ValueOutput;)V -> saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;Z)V
+CHCALL net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#loadFromTag(Lnet/minecraft/world/level/storage/ValueInput;)V -> loadAllItems(Lnet/minecraft/world/level/storage/ValueInput;Lnet/minecraft/core/NonNullList;)V
+CHCALL net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#saveAdditional(Lnet/minecraft/world/level/storage/ValueOutput;)V -> saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;Z)V
+CLASS net/minecraft/nbt/CompoundTag
+CLASS net/minecraft/world/ContainerHelper
+CLASS net/minecraft/world/level/block/entity/BarrelBlockEntity
+CLASS net/minecraft/world/level/block/entity/BaseContainerBlockEntity
+CLASS net/minecraft/world/level/block/entity/ChestBlockEntity
+CLASS net/minecraft/world/level/block/entity/HopperBlockEntity
+CLASS net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity
+CLASS net/minecraft/world/level/chunk/LevelChunk
+CLASS net/minecraft/world/level/storage/TagValueInput
+CLASS net/minecraft/world/level/storage/TagValueOutput
+FIELD net/minecraft/world/level/block/entity/BarrelBlockEntity#items:Lnet/minecraft/core/NonNullList; acc=2
+FIELD net/minecraft/world/level/block/entity/ChestBlockEntity#items:Lnet/minecraft/core/NonNullList; acc=2
+FIELD net/minecraft/world/level/block/entity/HopperBlockEntity#items:Lnet/minecraft/core/NonNullList; acc=2
+FIELD net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#itemStacks:Lnet/minecraft/core/NonNullList; acc=2
+FIELD net/minecraft/world/level/storage/TagValueInput#context:Lnet/minecraft/world/level/storage/ValueInputContextHelper; acc=18
+FIELD net/minecraft/world/level/storage/TagValueInput#input:Lnet/minecraft/nbt/CompoundTag; acc=17
+FIELD net/minecraft/world/level/storage/TagValueInput#problemReporter:Lnet/minecraft/util/ProblemReporter; acc=18
+FIELD net/minecraft/world/level/storage/TagValueOutput#ops:Lcom/mojang/serialization/DynamicOps; acc=18
+FIELD net/minecraft/world/level/storage/TagValueOutput#output:Lnet/minecraft/nbt/CompoundTag; acc=18
+FIELD net/minecraft/world/level/storage/TagValueOutput#problemReporter:Lnet/minecraft/util/ProblemReporter; acc=18
+HOPPERCALL isFullContainer <- net/minecraft/world/level/block/entity/HopperBlockEntity#ejectItems(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/HopperBlockEntity;)Z
+HOPPERCALL tryTakeInItemFromSlot <- net/minecraft/world/level/block/entity/HopperBlockEntity#suckInItems(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/level/block/entity/Hopper;)Z
+ITEMSREF net/minecraft/world/level/block/entity/BarrelBlockEntity#<init>(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)V PUT net/minecraft/world/level/block/entity/BarrelBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/BarrelBlockEntity#getContents()Ljava/util/List; GET net/minecraft/world/level/block/entity/BarrelBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/BarrelBlockEntity#getItems()Lnet/minecraft/core/NonNullList; GET net/minecraft/world/level/block/entity/BarrelBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/BarrelBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V GET net/minecraft/world/level/block/entity/BarrelBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/BarrelBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V PUT net/minecraft/world/level/block/entity/BarrelBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/BarrelBlockEntity#saveAdditional(Lnet/minecraft/world/level/storage/ValueOutput;)V GET net/minecraft/world/level/block/entity/BarrelBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/BarrelBlockEntity#setItems(Lnet/minecraft/core/NonNullList;)V PUT net/minecraft/world/level/block/entity/BarrelBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/ChestBlockEntity#<init>(Lnet/minecraft/world/level/block/entity/BlockEntityType;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)V PUT net/minecraft/world/level/block/entity/ChestBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/ChestBlockEntity#getContents()Ljava/util/List; GET net/minecraft/world/level/block/entity/ChestBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/ChestBlockEntity#getItems()Lnet/minecraft/core/NonNullList; GET net/minecraft/world/level/block/entity/ChestBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/ChestBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V GET net/minecraft/world/level/block/entity/ChestBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/ChestBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V PUT net/minecraft/world/level/block/entity/ChestBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/ChestBlockEntity#saveAdditional(Lnet/minecraft/world/level/storage/ValueOutput;)V GET net/minecraft/world/level/block/entity/ChestBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/ChestBlockEntity#setItems(Lnet/minecraft/core/NonNullList;)V PUT net/minecraft/world/level/block/entity/ChestBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/HopperBlockEntity#<init>(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)V PUT net/minecraft/world/level/block/entity/HopperBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/HopperBlockEntity#getContainerSize()I GET net/minecraft/world/level/block/entity/HopperBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/HopperBlockEntity#getContents()Ljava/util/List; GET net/minecraft/world/level/block/entity/HopperBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/HopperBlockEntity#getFullState(Lnet/minecraft/world/level/block/entity/HopperBlockEntity;)I GET net/minecraft/world/level/block/entity/HopperBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/HopperBlockEntity#getItems()Lnet/minecraft/core/NonNullList; GET net/minecraft/world/level/block/entity/HopperBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/HopperBlockEntity#inventoryFull()Z GET net/minecraft/world/level/block/entity/HopperBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/HopperBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V GET net/minecraft/world/level/block/entity/HopperBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/HopperBlockEntity#loadAdditional(Lnet/minecraft/world/level/storage/ValueInput;)V PUT net/minecraft/world/level/block/entity/HopperBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/HopperBlockEntity#saveAdditional(Lnet/minecraft/world/level/storage/ValueOutput;)V GET net/minecraft/world/level/block/entity/HopperBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/HopperBlockEntity#setItems(Lnet/minecraft/core/NonNullList;)V PUT net/minecraft/world/level/block/entity/HopperBlockEntity#items
+ITEMSREF net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#<init>(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)V PUT net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#itemStacks
+ITEMSREF net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#<init>(Lnet/minecraft/world/item/DyeColor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)V PUT net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#itemStacks
+ITEMSREF net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#getContainerSize()I GET net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#itemStacks
+ITEMSREF net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#getContents()Ljava/util/List; GET net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#itemStacks
+ITEMSREF net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#getItems()Lnet/minecraft/core/NonNullList; GET net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#itemStacks
+ITEMSREF net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#loadFromTag(Lnet/minecraft/world/level/storage/ValueInput;)V GET net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#itemStacks
+ITEMSREF net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#loadFromTag(Lnet/minecraft/world/level/storage/ValueInput;)V PUT net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#itemStacks
+ITEMSREF net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#saveAdditional(Lnet/minecraft/world/level/storage/ValueOutput;)V GET net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#itemStacks
+ITEMSREF net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#setItems(Lnet/minecraft/core/NonNullList;)V PUT net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#itemStacks
+METHOD net/minecraft/nbt/CompoundTag#copy()Lnet/minecraft/nbt/CompoundTag;
+METHOD net/minecraft/nbt/CompoundTag#write(Ljava/io/DataOutput;)V
+METHOD net/minecraft/world/ContainerHelper#loadAllItems(Lnet/minecraft/world/level/storage/ValueInput;Lnet/minecraft/core/NonNullList;)V
+METHOD net/minecraft/world/ContainerHelper#saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;)V
+METHOD net/minecraft/world/ContainerHelper#saveAllItems(Lnet/minecraft/world/level/storage/ValueOutput;Lnet/minecraft/core/NonNullList;Z)V
+METHOD net/minecraft/world/level/block/entity/BarrelBlockEntity#getItems()Lnet/minecraft/core/NonNullList;
+METHOD net/minecraft/world/level/block/entity/BarrelBlockEntity#setItems(Lnet/minecraft/core/NonNullList;)V
+METHOD net/minecraft/world/level/block/entity/ChestBlockEntity#getItems()Lnet/minecraft/core/NonNullList;
+METHOD net/minecraft/world/level/block/entity/ChestBlockEntity#setItems(Lnet/minecraft/core/NonNullList;)V
+METHOD net/minecraft/world/level/block/entity/HopperBlockEntity#isFullContainer(Lnet/minecraft/world/Container;Lnet/minecraft/core/Direction;)Z
+METHOD net/minecraft/world/level/block/entity/HopperBlockEntity#tryTakeInItemFromSlot(Lnet/minecraft/world/level/block/entity/Hopper;Lnet/minecraft/world/Container;ILnet/minecraft/core/Direction;Lnet/minecraft/world/level/Level;)Z
+METHOD net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#getItems()Lnet/minecraft/core/NonNullList;
+METHOD net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity#setItems(Lnet/minecraft/core/NonNullList;)V
+METHOD net/minecraft/world/level/chunk/LevelChunk#getBlockEntityNbtForSaving(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/CompoundTag;
+METHOD net/minecraft/world/level/storage/TagValueOutput#buildResult()Lnet/minecraft/nbt/CompoundTag;
+NBTUSE net/minecraft/world/level/chunk/ImposterProtoChunk#getBlockEntityNbtForSaving(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/CompoundTag; (none)
+NBTUSE net/minecraft/world/level/chunk/storage/SerializableChunkData#copyOf(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/level/chunk/ChunkAccess;)Lnet/minecraft/world/level/chunk/storage/SerializableChunkData; (none)
+SUPER net/minecraft/world/level/block/entity/BarrelBlockEntity=net/minecraft/world/level/block/entity/RandomizableContainerBlockEntity
+SUPER net/minecraft/world/level/block/entity/BaseContainerBlockEntity=net/minecraft/world/level/block/entity/BlockEntity
+SUPER net/minecraft/world/level/block/entity/ChestBlockEntity=net/minecraft/world/level/block/entity/RandomizableContainerBlockEntity
+SUPER net/minecraft/world/level/block/entity/HopperBlockEntity=net/minecraft/world/level/block/entity/RandomizableContainerBlockEntity
+SUPER net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity=net/minecraft/world/level/block/entity/RandomizableContainerBlockEntity
+WRITECALL net/minecraft/nbt/CompoundTag#writeNamedTag(Ljava/lang/String;Lnet/minecraft/nbt/Tag;Ljava/io/DataOutput;)V (owner net/minecraft/nbt/Tag)
+WRITECALL net/minecraft/nbt/ListTag#write(Ljava/io/DataOutput;)V (owner net/minecraft/nbt/Tag)
+WRITECALL net/minecraft/nbt/NbtIo#writeAnyTag(Lnet/minecraft/nbt/Tag;Ljava/io/DataOutput;)V (owner net/minecraft/nbt/Tag)
+WRITECALL net/minecraft/nbt/NbtIo#writeUnnamedTag(Lnet/minecraft/nbt/Tag;Ljava/io/DataOutput;)V (owner net/minecraft/nbt/Tag)

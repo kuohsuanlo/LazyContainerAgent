@@ -211,6 +211,32 @@ vanilla 載入一個放滿地圖畫/唱片的箱子,光把物品從 NBT 解出�
 
 ---
 
+## 出貨 gate(換版與每次改動的驗收)
+
+每一項優化都有自己的 use case、測試素材與通過條件,收在 [`gates/`](gates/README.md):
+
+```bash
+bash gates/run.sh                       # 全部 G0…G8,約 90–120 分鐘
+bash gates/run.sh --tiers G0,G1,G2,G3   # 只跑離線關卡,約 5 分鐘
+bash gates/run.sh --version 26.3        # 換版
+```
+
+| 關卡 | 守什麼 |
+|---|---|
+| G0 環境/版本 | JDK、核心 jar、classfile major、工具、素材來源 |
+| G1 建置 + 政策閘門 | 編得出來、鎖政策沒被破壞、版本字串一致 |
+| G2 注入形狀 diff | 目標版 NMS 的注入假設指紋與基準逐行比(**換版最重要的一關**) |
+| G3 差分/併發單元 | 摘要 vs 真 codec、物化競態、直寫框架、對帳告警 |
+| G4 存檔四模式 E2E | 原版/直寫/關直寫/直寫觀測 四種跑法輸出結構相等 |
+| G5 逐格裁判 | 真伺服器裡逐容器逐格 `ItemStack.matches` |
+| G6 摘要/影子對抗 | 執行中用真解碼當神諭校驗每次快答 |
+| G7 互動對抗 | 真 bot + 外掛 API + 指令 + 漏斗,單一 FINAL VERDICT |
+| G8 出貨物件 | 版本字串、文件、交付夾 |
+
+換版(26.2 → 26.3 → …)照 [`gates/UPGRADE.md`](gates/UPGRADE.md) 走:**測試資產是版本無關的基礎建設,換版是「重跑」不是「重寫」**。
+
+---
+
 ## 建置
 
 ```bash
@@ -261,6 +287,11 @@ java -Xms8000M -Xmx8000M \
 沒被碰過的箱子,存檔時不再把暫存的原始 bytes 解成 NBT 樹、再由核心逐節點重新序列化(#261 點名這段是艦隊 5 秒級卡頓的來源之一),而是把 bytes 直接接到核心寫區塊的輸出流:`CompoundTag` 多了一組「原始 Items」欄位,核心呼叫 `write()` 時先把它以標準 named-tag 框架(`[typeId][名稱][payload]`)吐出,其餘欄位照常;`copy()` 會一併帶走。只在核心真正為存檔收集方塊實體 NBT 的視窗(`LevelChunk.getBlockEntityNbtForSaving`)內、非 shadow、且 raw 確實是 ListTag 時啟用,其餘情況一律退回舊路徑;stats 行的 `rawPassthrough=` 計次。輸出與舊路徑**結構相等**(離線用真實 region 檔 A/B 比對過;compound 內 key 順序本來就由 Paper 的雜湊表決定)。
 
 **寫入前自檢**:掛上 bytes 之前先做一次零配置的 NBT 走訪,確認它剛好是一個完整合法的清單、長度分毫不差、字串是合法的 modified-UTF-8。規則逐條對齊伺服器讀取端或更嚴(含 `byte[]`/`int[]` 的 2^24 上限)——比讀取端嚴只會多退回舊路徑,比它寬鬆才會寫出讀不回的區塊。判定快取在方塊實體上(`rawOk`),每份 bytes 只走訪一次,自動存檔不重掃;耗時計在 `rawWalk=` / `rawWalkMaxMs=`。
+
+**側車有沒有真的被寫出去**:直寫是把 bytes 掛在核心存檔用的 `CompoundTag` 上,賭核心會原封不動把它交給 `write()`。
+26.2 確實如此,但這是版本相依的前提——若哪天核心在中間重建了那個 compound,側車會被靜默丟掉(箱子存成空),
+而且三個 hook 照樣 armed、計數照樣往上加。所以 `write()` 真的吐出側車時會累加 `rawEmit=`,與 `rawPassthrough=` 對帳;
+連續數輪追不上就印 `BAD PASSTHROUGH` 並提示用 `-Dlazycontainer.passthrough=false` 止血。正常兩者只差一個 IO 落後量。
 
 **萬一 bytes 真的壞了**:走訪拒收、或解析時丟例外,都不會把它寫進區塊。該容器改走原版編碼,原始 bytes 落檔成 `lc-badraw-<座標>-N.bin` 供 `tools/mca_restore.py` 使用,座標印在 log,計在 `badRaw=`(正常恆為 0);那一行的格式對齊面板的區塊救援偵測器,會自動建案並提示用還原工具貼回。這條很重要:26.2 的 NBT 讀取端對壞資料丟的是 RuntimeException 而不是 IOException,若讓它穿出去,核心會把**整個區塊這輪的存檔丟掉**(同區塊其他容器的變更一起沒寫),而且每次自動存檔重演。
 

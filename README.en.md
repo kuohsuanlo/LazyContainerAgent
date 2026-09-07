@@ -149,6 +149,23 @@ Watch **`shadowMismatch=0`**. With `-Dlazycontainer.dump=true`, both kinds dump 
 
 ---
 
+## Shipping gate
+
+Every optimisation has its own use case, fixtures and pass criteria, collected under [`gates/`](gates/README.md):
+
+```bash
+bash gates/run.sh                       # everything, G0…G8
+bash gates/run.sh --tiers G0,G1,G2,G3   # offline tiers only, ~1 minute
+bash gates/run.sh --version 26.3        # a different Minecraft version
+```
+
+G0 environment · G1 build + lock-policy gate · G2 injection-shape diff · G3 differential/concurrency unit tests ·
+G4 four-mode save end-to-end on real regions · G5 per-slot judge inside a real server · G6 summary/shadow adversarial ·
+G7 interactive adversarial (real bot, single FINAL VERDICT) · G8 shipping artefacts.
+
+Upgrading to a new Minecraft version follows [`gates/UPGRADE.md`](gates/UPGRADE.md): the test assets are
+version-independent infrastructure, so an upgrade is a *re-run*, not a rewrite.
+
 ## Build
 
 ```bash

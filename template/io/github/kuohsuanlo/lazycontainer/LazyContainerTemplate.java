@@ -518,6 +518,11 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                 if (this.lazycontainer$sameItems(raw, eager)) {
                     LazyContainerRuntime.onBenignReorder(String.valueOf(this.getBlockPos()),
                             String.valueOf(raw), String.valueOf(eager));
+                } else if (this.lazycontainer$sameDecoded(raw, eager, allowEmpty)) {
+                    // 同一組物品、不同寫法(例如巢狀 container 的 entry 省略了預設的 count:1,
+                    // 原版重新編碼會補上)。判定用原版自己的解碼器逐格比,不是我們自己認定。
+                    LazyContainerRuntime.onBenignEncoding(String.valueOf(this.getBlockPos()),
+                            "raw " + (raw instanceof ListTag ? ((ListTag) raw).size() : -1) + " entries");
                 } else {
                     LazyContainerRuntime.onShadowMismatch();
                     LazyContainerRuntime.dumpMismatch(String.valueOf(this.getBlockPos()),
@@ -579,6 +584,42 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
             }
         }
         return true;
+    }
+
+    /**
+     * raw 與 eager 兩棵樹「解碼後」是否逐格相同。
+     *
+     * <p>用的是<b>原版自己的解碼器</b>({@code ContainerHelper.loadAllItems})與原版自己的相等判定
+     * ({@code ItemStack.matches},含 components),所以結論不是我們的主觀認定。相同 ⟹ 玩家看到的
+     * 東西一模一樣,兩棵樹的差別只是寫法(最典型:巢狀 container 的 entry 省略預設 count)。</p>
+     *
+     * <p>只在 shadow 模式、且已經測出「樹不相等」時才會呼叫,不在任何熱路徑上。</p>
+     */
+    private boolean lazycontainer$sameDecoded(Tag rawTag, Tag eagerTag, boolean allowEmpty) {
+        try {
+            int size = this.getContainerSize();
+            NonNullList<ItemStack> a = NonNullList.withSize(size, ItemStack.EMPTY);
+            NonNullList<ItemStack> b = NonNullList.withSize(size, ItemStack.EMPTY);
+            CompoundTag ra = new CompoundTag();
+            if (rawTag != null) {
+                ra.put("Items", rawTag);
+            }
+            CompoundTag rb = new CompoundTag();
+            if (eagerTag != null) {
+                rb.put("Items", eagerTag);
+            }
+            ContainerHelper.loadAllItems(TagValueInput.createGlobal(ProblemReporter.DISCARDING, ra), a);
+            ContainerHelper.loadAllItems(TagValueInput.createGlobal(ProblemReporter.DISCARDING, rb), b);
+            for (int i = 0; i < size; i++) {
+                if (!ItemStack.matches(a.get(i), b.get(i))) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (Throwable t) {
+            // 判不出來就當成真的分歧(寧可多報一筆,也不要把真差異吞掉)
+            return false;
+        }
     }
 
     // ── 摘要(ensure 快取):HopperBlockEntity hook 的進入點 ──

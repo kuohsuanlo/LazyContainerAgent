@@ -40,6 +40,29 @@ public final class LazyContainerRuntime {
     public static final AtomicLong benignReorder = new AtomicLong();
 
     /**
+     * shadow 的第三類:raw 與「原版重新編碼」的樹不同,但<b>逐格解碼出來的 ItemStack 完全相同</b>
+     * ——同樣的物品、不同的寫法。
+     *
+     * <p>真實資料上這是有的:例如巢狀 {@code minecraft:container} 裡的 entry 省略了 {@code count}
+     * (預設 1),原版重新編碼會把 {@code count:1} 明確寫出來。我們不做正規化、原樣寫回,
+     * 於是樹不相等——但玩家看到的東西一模一樣。</p>
+     *
+     * <p>把這類算成 shadowMismatch 會讓「上線前開 shadow 觀察」變成噪音(實測真實倉庫 47 個),
+     * 值班的人就會學會忽略它。判定用的是<b>原版自己的解碼器</b>,不是我們的認定。</p>
+     */
+    public static final AtomicLong benignEncoding = new AtomicLong();
+
+    private static final java.util.concurrent.atomic.AtomicInteger BENIGN_ENC_LOGGED = new java.util.concurrent.atomic.AtomicInteger();
+
+    public static void onBenignEncoding(String pos, String detail) {
+        benignEncoding.incrementAndGet();
+        if (BENIGN_ENC_LOGGED.incrementAndGet() <= 10) {
+            System.out.println("[LazyContainer] benign encoding @ " + pos
+                    + " —— 解碼後逐格相同,只是原版會補寫預設值/換寫法;原樣保留(" + detail + ")");
+        }
+    }
+
+    /**
      * {@code -Dlazycontainer.summary=false} 單獨關掉「摘要(ensure 快取)」,保留延遲解碼本體。
      * <p>獨立 kill switch:本 agent 已在 production,萬一摘要在真實地圖上冒出行為差異,
      * 服主可只關這一項、不必整包回滾掉已驗證的延遲解碼。</p>
@@ -212,6 +235,19 @@ public final class LazyContainerRuntime {
         rawPassthrough.increment();
     }
 
+    /**
+     * 真的被寫進輸出串流的 raw 具名 entry 次數(在被改寫的 {@code CompoundTag.write} 內累加)。
+     *
+     * <p><b>這是直寫唯一「會自己叫」的機制。</b>直寫把 bytes 掛在 CompoundTag 的側車欄位上,賭的是
+     * 「核心從 getBlockEntityNbtForSaving 拿到那個 compound 之後,原封不動地把它交給 write()」。
+     * 若某個版本在中間多了一段「用 entrySet/putAll 重建 tag」的程式,側車會被靜默丟掉——
+     * 三個 hook 全部 armed、attachRaw 成功、rawPassthrough 照加,但箱子會存成空。
+     * 那個情況的唯一外顯訊號就是 {@code rawEmit} 追不上 {@code rawPassthrough}。</p>
+     *
+     * <p>正常情況兩者只差一個「存檔收集 → IO 執行緒真的寫出」的落後量(短暫、會回補)。</p>
+     */
+    public static final java.util.concurrent.atomic.LongAdder rawEmit = new java.util.concurrent.atomic.LongAdder();
+
     /** per-thread 巢狀深度:>0 表示此執行緒正在 LevelChunk.getBlockEntityNbtForSaving 內(chunk 存檔)。 */
     private static final ThreadLocal<int[]> CHUNK_SAVE_DEPTH = new ThreadLocal<int[]>() {
         @Override
@@ -261,6 +297,7 @@ public final class LazyContainerRuntime {
         out.writeByte(raw[0]);
         out.writeUTF(key);
         out.write(raw, 1, raw.length - 1);
+        rawEmit.increment();
     }
 
     private static volatile java.lang.reflect.Field RAW_KEY_FIELD;
@@ -835,6 +872,7 @@ public final class LazyContainerRuntime {
                 + " ensure=" + ensure.get()
                 + " rawSave=" + rawSave.get()
                 + " rawPassthrough=" + rawPassthrough.sum()
+                + " rawEmit=" + rawEmit.sum()
                 + " rawWalk=" + rawWalk.sum()
                 + " rawWalkMaxMs=" + (rawWalkMaxNanos.get() / 1_000_000L)
                 + " badRaw=" + badRaw.sum()
@@ -850,6 +888,7 @@ public final class LazyContainerRuntime {
                 + " summaryMismatch=" + summaryMismatch.sum()
                 + " shadowMismatch=" + shadowMismatch.get()
                 + " benignReorder=" + benignReorder.get()
+                + " benignEncoding=" + benignEncoding.get()
                 // 關閉時印明確標記而非八個 0——值班的人才分得出「功能關著」與「歸因掛了」(審查 low)
                 + (ATTRIBUTION
                         ? " attrHopper=" + attrHopper.sum()
@@ -872,6 +911,58 @@ public final class LazyContainerRuntime {
                         : " attribution=off");
     }
 
+    /** 直寫對帳:連續幾輪 deficit 不降就告警(避免把「IO 落後」誤報成側車遺失)。 */
+    private static final int PT_DEFICIT_MIN = Integer.getInteger("lazycontainer.passthrough.deficitMin", 4096);
+    private static final int PT_DEFICIT_STREAK = Integer.getInteger("lazycontainer.passthrough.deficitStreak", 3);
+    private static long ptLastDeficit = Long.MIN_VALUE;
+    private static long ptLastAttached = Long.MIN_VALUE;
+    private static int ptDeficitStreak;
+    private static boolean ptDeficitReported;
+
+    /**
+     * {@code rawPassthrough}(掛上側車)對 {@code rawEmit}(側車真的被寫出)的對帳。
+     * <p>差額只該來自「存檔收集 → IO 執行緒寫出」的落後,會回補。判定條件是
+     * <b>「這一輪沒有再掛新的側車」且差額連續數輪超過門檻又不下降</b> —— 存檔是一陣一陣的,
+     * 爆量存檔當下差額本來就會連著幾輪往上長,把那個當異常就是誤報,而誤報的代價是叫值班的人去關掉直寫。
+     * 真正的失效長相是「已經沒有新的掛上去了,寫出的數字卻還是追不上」:核心把側車丟了
+     * (換版最危險、且唯一不會自己爆的失效模式)。此時大聲印一行並提示關掉直寫。</p>
+     */
+    static void checkPassthroughDeficit() {
+        if (!PASSTHROUGH || PASSTHROUGH_SHADOW) {
+            return;
+        }
+        long attached = rawPassthrough.sum();
+        long emitted = rawEmit.sum();
+        long deficit = attached - emitted;
+        // 只在「這一輪沒有再掛新的側車」時才判定。存檔是一陣一陣的:收集在 region 執行緒、
+        // 寫出在 IO 執行緒,爆量存檔當下落後量本來就會連著幾輪往上長——那是正常的,不是側車不見了。
+        // 真正的失效長相是「已經沒有新的掛上去了,寫出的數字卻還是追不上」。
+        boolean busy = attached != ptLastAttached;
+        ptLastAttached = attached;
+        if (!busy && deficit >= PT_DEFICIT_MIN && deficit <= ptLastDeficit) {
+            ptDeficitStreak++;
+        } else {
+            ptDeficitStreak = 0;
+            ptDeficitReported = false;
+        }
+        ptLastDeficit = deficit;
+        if (ptDeficitStreak >= PT_DEFICIT_STREAK && !ptDeficitReported) {
+            ptDeficitReported = true;
+            System.err.println("[LazyContainer] BAD PASSTHROUGH: 掛上側車 " + attached + " 次,實際寫出只有 "
+                    + emitted + " 次(差 " + deficit + ",連續 " + ptDeficitStreak + " 輪沒回補)。"
+                    + "核心的存檔鏈可能在中途重建了 CompoundTag,直寫的 Items 會被丟掉 ⟹ "
+                    + "請立刻加上 -Dlazycontainer.passthrough=false 重啟,並回報此行。");
+        }
+    }
+
+    /** 只給測試用:把對帳狀態機歸零(生產路徑不呼叫)。 */
+    static void resetPassthroughDeficitStateForTest() {
+        ptLastDeficit = Long.MAX_VALUE;
+        ptLastAttached = Long.MIN_VALUE;
+        ptDeficitStreak = 0;
+        ptDeficitReported = false;
+    }
+
     /**
      * premain 呼叫:若 verbose 則開一條 daemon 每 30s 印一次計數(僅供測試觀測)。
      * <p>必須 public:premain 的 AgentMain 在 app loader 執行,本類別在 bootstrap loader,
@@ -891,6 +982,7 @@ public final class LazyContainerRuntime {
                 }
                 System.out.println("[LazyContainer] " + stats()
                         + (shadow() ? " (SHADOW)" : "") + " active=" + injected);
+                checkPassthroughDeficit();
             }
         }, "LazyContainer-stats");
         t.setDaemon(true);

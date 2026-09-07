@@ -136,6 +136,36 @@ autosave 重演;`ensure` 那條更會在漏斗 tick 上反覆炸。此洞 26.2-2
 (log 無聲、尺寸不變)面板看不到,26.2-5 起靠 BAD RAW 行補上;26.2-4 修掉的「壞 bytes 讓整個 chunk 不落盤」
 核心印的是 `Failed to save chunk`,不在面板關鍵字裡,以前也看不到。
 
+## 26.2-6:直寫對帳 `rawEmit`(唯一會自己叫的那道)
+
+直寫的正確性押在一個我們不控制的前提上:**核心從 `getBlockEntityNbtForSaving` 拿到那個 compound 之後,
+會原封不動地把它交給 `write()`。** 26.2 是這樣沒錯(`SerializableChunkData.copyOf` 完全不碰 NBT 方法,
+`gates/shape/26.2.txt` 的 `NBTUSE` 行把這件事釘成可比對的指紋)。但這是**版本相依的前提**。
+
+若某個版本在中間多一段「用 entrySet 重建 tag」的程式,側車會被靜默丟掉:
+三個 hook 全部 armed、`attachRaw` 成功、`rawPassthrough` 照加,**但箱子存成空**。
+這是整個專案唯一一種「不會自己爆」的失效模式——shadow 也抓不到,因為它的探針走自己的 `NbtIo.write`。
+
+所以 26.2-6 在被改寫的 `CompoundTag.write` 裡加了 `rawEmit`:**側車真的被寫進輸出串流**才 +1。
+
+| | 意義 |
+|---|---|
+| `rawPassthrough` | 掛上側車的次數(存檔收集時,在 region 執行緒) |
+| `rawEmit` | 側車真的被寫出去的次數(序列化時,在 IO 執行緒) |
+
+正常情況兩者只差一個「收集 → 寫出」的落後量,會回補。verbose daemon 每輪對帳一次,
+**連續 3 輪差額不降且超過 4096** 才印:
+
+```
+[LazyContainer] BAD PASSTHROUGH: 掛上側車 N 次,實際寫出只有 M 次(差 D,連續 3 輪沒回補)。
+核心的存檔鏈可能在中途重建了 CompoundTag,直寫的 Items 會被丟掉 ⟹
+請立刻加上 -Dlazycontainer.passthrough=false 重啟,並回報此行。
+```
+
+門檻與遲滯是刻意的:會誤報的告警等於沒有告警。`PassthroughDeficitTest` 同時守兩邊——
+側車全丟必須叫、正常 IO 落後與一次性尖峰必須安靜。出貨閘門 G4-A 與 G7 則直接斷言
+`rawEmit ≥ 0.99 × rawPassthrough`。
+
 ## 上線建議
 
 - 先鋪 s45(#261 點名 9 筆)重啟,看 stats 行 `rawPassthrough=` 增長、watchdog 堆疊裡 `lazycontainer$decodeRaw` 出現在存檔路徑的次數應歸零。
