@@ -70,6 +70,9 @@ for m in $MODES; do
     [ "${sw:-1}" = 0 ] && ok "[$m] silentWipe=0(無靜默清空)" || fail "[$m] silentWipe=$sw —— 有容器在沒人碰的情況下被清空"
     nsm=$(grep -ac 'SAFE MODE' "$E/$m.log" || true)
     [ "${nsm:-1}" = 0 ] && ok "[$m] 未觸發自動降級" || fail "[$m] 觸發了 SAFE MODE($nsm 行)"
+    # 紅綠驗證台的故障注入旗標絕對不能出現在出貨驗證裡(那會故意弄壞資料)
+    nfi=$(grep -ac 'FAULT INJECTION ACTIVE' "$E/$m.log" || true)
+    [ "${nfi:-1}" = 0 ] && ok "[$m] 沒有帶到故障注入旗標" || fail "[$m] 帶了故障注入旗標($nfi 行)—— 這一輪的紅綠不算數"
   fi
   case "$m" in
     A)

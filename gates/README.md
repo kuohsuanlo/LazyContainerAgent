@@ -98,6 +98,7 @@ mkdir -p $LC_GATE_HOME/fixtures/w1 && cp <你的世界>/region/r.0.0.mca $LC_GAT
 
 | 關卡 | 守什麼 | 素材 | 大約耗時 | 通過條件(摘要) |
 |---|---|---|---|---|
+| **RED** 紅綠驗證台 | **證明警報不是死的**:故意把資料弄壞,看紅燈亮不亮;再關掉守門當對照組,證明同一個故障真的會靜默弄丟東西 | 真實 region ×1 | 25 分鐘 | 紅回合亮紅 + 綠回合不亮 + 對照組真的掉東西,三者同時成立 |
 | **G0** 環境/版本 | 拿錯 JDK、拿錯核心 jar、少裝工具 —— 這關沒過,後面每一關的紅綠都不能信 | 無 | 10 秒 | JDK major、核心 `version.json`、NMS classfile major、Via 外掛、素材來源可連 |
 | **G1** 建置 + 政策閘門 | 編得出來;注入形狀沒違反跨執行緒鎖政策 | 無 | 40 秒 | `build.sh` 綠、template classfile major 對得上、`LockPolicyCheck` 違規 0、jar/pom 版本字串一致 |
 | **G2** 注入形狀 diff | **換版最重要的一關**:目標版 NMS 的形狀指紋與基準逐行比對 | NMS jar | 20 秒 | 消失 0 **且新增 0**(新增的行同樣要人看過) |
@@ -186,6 +187,8 @@ mkdir -p $LC_GATE_HOME/fixtures/w1 && cp <你的世界>/region/r.0.0.mca $LC_GAT
 | `-Dlazycontainer.shadow=true` | 影子驗證:輸出等同原版、只回報不改資料 | G6 |
 | `-Dlazycontainer.passthrough=false` | 關掉存檔直寫(回 26.2-2 舊路徑) | G4 模式 B |
 | `-Dlazycontainer.passthrough.shadow=true` | 直寫觀測模式 | G4 模式 C |
+| `-Dlazycontainer.fault=corruptRaw\|wipe\|wipeKeepRaw` | **故障注入,只給紅綠驗證台**。啟用時開機印一整段大字,G4 會 grep 那段字判紅 | RED |
+| `-Dlazycontainer.guard=false` | 關掉存檔守門(紅綠驗證台的對照組) | RED |
 | (無旗標)自動降級 SAFE MODE | 偵測到靜默清空或壞 raw 就**就地**關閉直寫,之後每次存檔都走解析路徑;重啟才恢復 | G3、G4 |
 | `-Dlazycontainer.summary=false` | 關掉漏斗摘要快答 | (手動;G6 是開著驗) |
 | `-Dlazycontainer.attribution=false` | 關掉歸因(stats 印 `attribution=off`) | — |

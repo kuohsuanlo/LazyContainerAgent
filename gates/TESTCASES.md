@@ -164,6 +164,23 @@ bot 操作 5 種(`open` / `pickput` / `move` / `take` / `dig`)+ 卸載重載 + �
 ListTag 表頭算出(不解析);`accessed` 是一個 volatile 寫,而且只在 `pending` 還是 true 時走得到
 (每個容器每次載入至多一次)。解碼只發生在報警分支,那條路正常應該永遠不會執行。
 
+## 五之三、紅綠驗證台(`gates/red.sh`)
+
+單元測試證明的是「程式碼在假資料上會走進那個分支」。紅綠驗證台證明的是另一件事:
+**在真的伺服器、真的正式站 region 上,把資料弄壞,紅燈真的會亮**——而且同一個故障在
+關掉守門時真的會把東西弄丟。少了最後這一條,前面的紅可能只是「故障根本沒破壞力」。
+
+| 回合 | 注入什麼 | 應該發生什麼 |
+|---|---|---|
+| `green` | 不注入 | 完全安靜、磁碟零流失(沒有假紅) |
+| `wipeKeepRaw` | 清單被清空,但 raw 還在 | **磁碟零流失**:沒被碰過的容器本來就是原樣寫回,這是主要防線 |
+| `wipe` | 清單被清空,raw 已被物化吃掉 | `SILENT WIPE` + `silentWipe` 計數器 + `SAFE MODE` |
+| `wipe-noguard` | 同上,但 `-Dlazycontainer.guard=false` | **沒有任何警報,而且磁碟真的掉容器**(對照組) |
+| `corruptRaw` | raw 被改壞一個 byte | `BAD RAW` + `lc-badraw` 落檔 + `SAFE MODE` |
+
+故障注入預設全關,啟用時開機會印一整段 `FAULT INJECTION ACTIVE` 大字,G4 每個模式都會
+grep 那段字判紅——避免有人把紅綠驗證台的旗標帶進出貨驗證。
+
 ## 六、離線比對判定
 
 - `structcmp.py`:每份輸出「時間戳真的變過的 chunk ≥90%」(反空洞)+ 五個版本兩兩結構比對
