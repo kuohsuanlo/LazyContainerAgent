@@ -295,10 +295,19 @@ for l in LABELS:
     consumed = sum(int(re.search(r'consumed=(\d+)', p[5]).group(1)) for p in crafts)
     expect_delta = produced - consumed
     actual_delta = r['itemsTotalOut'] - r['itemsTotalIn']
-    (OK if actual_delta == expect_delta and (r['multisetDeltaKinds'] == 0 or crafts) else F)(
-        f"[{l}] 物品守恆:總數 {r['itemsTotalIn']}→{r['itemsTotalOut']}(差 {actual_delta}),"
-        f"合成器 {len(crafts)} 次合成產出 {produced} 消耗 {consumed} ⟹ 預期差 {expect_delta};種類差 {r['multisetDeltaKinds']}")
-    for k, x in list(r['multisetDelta'].items())[:5]: print("       ", k, x)
+    # 種類差不等於「生出來或消失」:機器把界伏盒倒空、外掛動了物品上的標籤,都會讓
+    # 同一個物品的**身分**改變(components 不同),但東西還是那些東西。真正要抓的是
+    # 「某個物品 id 的淨數量變了」——那才是無中生有或憑空消失。
+    per_id = collections.Counter()
+    for key, (a_, b_) in r['multisetDelta'].items():
+        per_id[key.split('|')[0]] += b_ - a_
+    id_net = {k: v for k, v in per_id.items() if v != 0}
+    (OK if actual_delta == expect_delta else F)(
+        f"[{l}] 物品總數守恆:{r['itemsTotalIn']}→{r['itemsTotalOut']}(差 {actual_delta}),"
+        f"合成器 {len(crafts)} 次產出 {produced} 消耗 {consumed} ⟹ 預期差 {expect_delta}")
+    (OK if not id_net else F)(
+        f"[{l}] 沒有任何物品 id 憑空增減(身分變動 {r['multisetDeltaKinds']} 種,淨變化不為 0 的 id:{len(id_net)})")
+    for k, v in list(id_net.items())[:5]: print("       ", k, "淨變化", v)
     (OK if r['missing'] == 0 and r['extra'] == 0 else F)(f"[{l}] 漏斗段 MISSING={r['missing']} EXTRA={r['extra']}")
 
 print("== 6. 開箱後寫回 ==")
