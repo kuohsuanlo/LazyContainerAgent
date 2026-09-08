@@ -11,8 +11,8 @@ echo "$sum" | sed 's/^/     /'
 nsucc=$(grep -E "tests successful" "$LC_OUT/test.log" | grep -oE '[0-9]+' | head -1)
 nfail=$(grep -E "tests failed"     "$LC_OUT/test.log" | grep -oE '[0-9]+' | head -1)
 [ "${nfail:-1}" = "0" ] && ok "失敗 0 個" || fail "失敗 ${nfail} 個"
-[ "${nsucc:-0}" -ge 60 ] && ok "成功 ${nsucc} 個(≥60:確認測試真的有編進去)" || fail "只跑了 ${nsucc} 個測試,少於預期(是不是有測試沒編譯到?)"
-for t in SummaryDifferentialTest EnsureRaceTest AttributionClassifyTest ComponentPartialSemanticsTest RawPassthroughFramingTest PassthroughDeficitTest; do
+[ "${nsucc:-0}" -ge 70 ] && ok "成功 ${nsucc} 個(≥70:確認測試真的有編進去)" || fail "只跑了 ${nsucc} 個測試,少於預期(≥70;是不是有測試沒編譯到?)"
+for t in SummaryDifferentialTest EnsureRaceTest AttributionClassifyTest ComponentPartialSemanticsTest RawPassthroughFramingTest PassthroughDeficitTest SilentWipeGuardTest; do
   grep -q "$t" "$LC_OUT/test.log" && ok "測試類別有跑:$t" || fail "測試類別沒跑:$t"
 done
 tier_verdict

@@ -58,6 +58,23 @@ forceload_region() {
     rig_send "execute in minecraft:$dim run forceload add $((bx0+bx)) $((bz0+bz)) $((bx0+bx+255)) $((bz0+bz+255))" 1.2
   done; done
 }
+# 送 tick freeze,並回報這個核心到底吃不吃。
+# Folia 系(區域執行緒)把全域 tick 拿掉了,`/tick freeze` 不存在——靜默失敗會讓「凍結比對」
+# 變成「一邊比一邊被世界改」,而且完全看不出來。所以要偵測並且講出來。
+try_freeze() {
+  local console="$1" before after
+  before=$(grep -ac "HERE" "$console" 2>/dev/null || echo 0)
+  rig_send "tick freeze" 2
+  after=$(grep -ac "HERE" "$console" 2>/dev/null || echo 0)
+  if [ "${after:-0}" -gt "${before:-0}" ]; then
+    LC_FROZEN=0
+    warn "這個核心不支援 tick freeze(區域執行緒核心沒有全域 tick)——世界會邊比邊動,改用機械事件證據判定"
+    return 1
+  fi
+  LC_FROZEN=1
+  return 0
+}
+
 # 等 stash 穩定(連兩次相同且大於門檻)
 wait_stash() {
   local min="${1:-1000}" prev=-1 cur

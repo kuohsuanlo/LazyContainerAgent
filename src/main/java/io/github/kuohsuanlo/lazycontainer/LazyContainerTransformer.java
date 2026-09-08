@@ -353,7 +353,7 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
     }
 
     /**
-     * 方法入口插:ENSURE = {@code if(pending) ensure();};CLEAR = {@code lazycontainer$clear();}(26.2-2:進 monitor)。
+     * 方法入口插:ENSURE = {@code if(pending) ensureAccessed();};CLEAR = {@code lazycontainer$clear();}(26.2-2:進 monitor)。
      * CLEAR 用於 setItems(換清單)與 loadAdditional/loadFromTag(重新載入)——兩者都會讓既有的 lazy 狀態失效。
      */
     private static final class GuardMethodVisitor extends MethodVisitor {
@@ -375,7 +375,7 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
                 super.visitFieldInsn(Opcodes.GETFIELD, owner, "lazycontainer$pending", "Z");
                 super.visitJumpInsn(Opcodes.IFEQ, skip);
                 super.visitVarInsn(Opcodes.ALOAD, 0);
-                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, owner, "lazycontainer$ensure", "()V", false);
+                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, owner, "lazycontainer$ensureAccessed", "()V", false);
                 super.visitLabel(skip);
                 super.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
             } else { // GUARD_CLEAR

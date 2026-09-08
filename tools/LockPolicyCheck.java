@@ -29,6 +29,12 @@ public class LockPolicyCheck {
     static final String RT = "io/github/kuohsuanlo/lazycontainer/LazyContainerRuntime";
 
     static final String PENDING = "lazycontainer$pending";
+    /** volatile 旗標,鎖外寫是設計的一部分(見 template 的欄位註解):pending 由 ensure 發佈清單,
+     *  accessed 由 leaf guard 在存取當下標記。兩者皆 volatile,鎖外寫不會造成半可見狀態。 */
+    static final String ACCESSED = "lazycontainer$accessed";
+    /** 鎖外「讀」ensuring 是安全的(見 template 欄位註解的證明):值為 T 的寫入只可能出自 T 自己,
+     *  因此 T 讀到 ensuring==T 必為真、讀到別的值也只會讓它走進 monitor 慢路徑。鎖外「寫」仍然違規。 */
+    static final String ENSURING = "lazycontainer$ensuring";
     static final Set<String> SUMMARY = Set.of("lazycontainer$sumState","lazycontainer$sumBits","lazycontainer$sumFullTri");
     static final Set<String> GUARDED = Set.of("lazycontainer$raw","lazycontainer$ensuring",
             "lazycontainer$sumState","lazycontainer$sumBits","lazycontainer$sumFullTri");
@@ -66,7 +72,7 @@ public class LockPolicyCheck {
         ClassNode base = out.get(BASE);
         long fld = base.fields.stream().filter(f -> f.name.startsWith("lazycontainer$")).count();
         long mth = base.methods.stream().filter(m -> m.name.startsWith("lazycontainer$")).count();
-        if (fld == 7 && mth >= 12) ok("base splice: " + fld + " fields + " + mth + " methods");
+        if (fld == 9 && mth >= 12) ok("base splice: " + fld + " fields + " + mth + " methods");
         else fail("base splice 數量異常: " + fld + " fields / " + mth + " methods");
 
         // 呼叫閉包:private 的未同步方法,只要「所有呼叫端都持鎖」即合規(trySaveRaw 就是這型)
@@ -98,8 +104,9 @@ public class LockPolicyCheck {
                     touched.add((write?"w:":"r:")+f.name.substring(14));
                     if (f.name.equals(PENDING) && !write) sawPendingRead = true;
                     if (!sync && !mon) {
-                        if (write && !f.name.equals(PENDING)) r1 = "未持鎖卻寫 " + f.name;
-                        else if (GUARDED.contains(f.name) && !SUMMARY.contains(f.name)) r1 = "未持鎖卻碰 " + f.name;
+                        if (write && !f.name.equals(PENDING) && !f.name.equals(ACCESSED)) r1 = "未持鎖卻寫 " + f.name;
+                        else if (GUARDED.contains(f.name) && !SUMMARY.contains(f.name)
+                                && !(f.name.equals(ENSURING) && !write)) r1 = "未持鎖卻碰 " + f.name;
                         else if (SUMMARY.contains(f.name) && !sawPendingRead)
                             r2 = "未持鎖讀 " + f.name + " 之前沒有先讀 volatile pending";
                     }
@@ -187,8 +194,8 @@ public class LockPolicyCheck {
         for (AbstractInsnNode in : m.instructions) if (in.getOpcode()==Opcodes.MONITORENTER) return true;
         return false; }
     static String expectGuard(String name,String desc){
-        if (name.equals("getItems") && desc.equals("()Lnet/minecraft/core/NonNullList;")) return "lazycontainer$ensure";
-        if (name.equals("getContents") && desc.equals("()Ljava/util/List;")) return "lazycontainer$ensure";
+        if (name.equals("getItems") && desc.equals("()Lnet/minecraft/core/NonNullList;")) return "lazycontainer$ensureAccessed";
+        if (name.equals("getContents") && desc.equals("()Ljava/util/List;")) return "lazycontainer$ensureAccessed";
         if (name.equals("setItems") && desc.equals("(Lnet/minecraft/core/NonNullList;)V")) return "lazycontainer$clear";
         if ((name.equals("loadAdditional")||name.equals("loadFromTag"))
                 && desc.equals("(Lnet/minecraft/world/level/storage/ValueInput;)V")) return "lazycontainer$clear";

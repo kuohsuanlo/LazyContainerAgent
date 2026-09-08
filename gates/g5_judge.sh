@@ -10,8 +10,10 @@ rig_kill
 mkdir -p "$LC_RIG/plugins/LcCompare"; rm -f "$LC_RIG/plugins/LcCompare/report-"*.json
 : > "$LC_RIG/plugins/LcCompare/jobs.txt"
 while read -r label dim reg rx rz; do
-  printf 'in-%s\t%s\t%s\n' "$label" "$LC_FIXTURES_DIR/$label/$reg.mca" "$E/A/$label/$reg.mca" >> "$LC_RIG/plugins/LcCompare/jobs.txt"
-  printf 'BA-%s\t%s\t%s\n' "$label" "$E/B/$label/$reg.mca" "$E/A/$label/$reg.mca" >> "$LC_RIG/plugins/LcCompare/jobs.txt"
+  # 第 5 欄=機械事件證據(G4 收的)。核心不支援 tick freeze 時世界會邊比邊動,
+  # 只有這些位置的差異算「可解釋」;其餘一律零容忍。支援 freeze 的核心上這份是空的。
+  printf 'in-%s\t%s\t%s\t%s\t%s\n' "$label" "$LC_FIXTURES_DIR/$label/$reg.mca" "$E/A/$label/$reg.mca" "" "$E/machinery-all.txt" >> "$LC_RIG/plugins/LcCompare/jobs.txt"
+  printf 'BA-%s\t%s\t%s\t%s\t%s\n' "$label" "$E/B/$label/$reg.mca" "$E/A/$label/$reg.mca" "" "$E/machinery-all.txt" >> "$LC_RIG/plugins/LcCompare/jobs.txt"
 done < "$LC_FIXTURES_DIR/fixtures.tsv"
 cp "$LC_LIB_DIR/plugins/lccompare/LcCompare.jar" "$LC_RIG/plugins/"
 rig_boot "$R/console.log" -DdisableWatchdog=true || { fail "裁判伺服器沒起來"; tier_verdict; exit 1; }
@@ -20,7 +22,7 @@ sleep 8; rig_kill; rm -f "$LC_RIG/plugins/LcCompare.jar"
 grep -q "LCCOMPARE ALL DONE fails=0" "$R/console.log" && ok "裁判全部跑完、無工作失敗" || fail "裁判沒跑完或有工作炸掉"
 cp "$LC_RIG/plugins/LcCompare/report-"*.json "$R/" 2>/dev/null
 grep -a "LCCOMPARE" "$R/console.log" | sed 's/.*\] //; s/^/     /'
-python3 "$LC_LIB_DIR/py/judge_frozen.py" "$LC_FIXTURES_DIR" "$R" > "$R/verdict.txt" 2>&1
+python3 "$LC_LIB_DIR/py/judge_frozen.py" "$LC_FIXTURES_DIR" "$R" "$E/machinery-all.txt" > "$R/verdict.txt" 2>&1
 rc=$?; sed 's/^/     /' "$R/verdict.txt"
 [ $rc -eq 0 ] && ok "逐格裁判零差異" || fail "逐格裁判有差(見 $R/verdict.txt)"
 tier_verdict

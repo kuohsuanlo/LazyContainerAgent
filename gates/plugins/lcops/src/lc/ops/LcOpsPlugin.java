@@ -134,6 +134,8 @@ public final class LcOpsPlugin extends JavaPlugin implements Listener {
      * (物化後由原版重編碼,寫法可能變、內容不變),否則就是直寫沒保真。
      */
     private void dumpPending() {
+        // 註:區域執行緒核心上,跨區讀活體 BlockEntity 會被拒。這裡讀的是 chunk 的 blockEntities map
+        // 與一個 volatile 欄位,不改任何狀態;若核心仍拒絕,下面的 try/catch 會讓該 chunk 略過而不是整個炸掉。
         int n = 0, pend = 0;
         try (PrintWriter w = new PrintWriter(new FileWriter(new File(getDataFolder(), "pending.tsv"), false))) {
             for (World world : Bukkit.getWorlds()) {
@@ -144,8 +146,10 @@ public final class LcOpsPlugin extends JavaPlugin implements Listener {
                     // 而快照走的是 saveWithFullMetadata → trySaveRaw 的「非存檔視窗」路徑,
                     // 會把 rawSave 灌上 11 萬次而 rawPassthrough 不動,直接把 G7 的比例閘門打紅(實際踩過)。
                     // 直接讀 NMS chunk 的 blockEntities map,不建任何快照。
-                    for (Map.Entry<net.minecraft.core.BlockPos, net.minecraft.world.level.block.entity.BlockEntity> en
-                            : lvl.getChunk(c.getX(), c.getZ()).getBlockEntities().entrySet()) {
+                    Map<net.minecraft.core.BlockPos, net.minecraft.world.level.block.entity.BlockEntity> bes;
+                    try { bes = lvl.getChunk(c.getX(), c.getZ()).getBlockEntities(); }
+                    catch (Throwable th) { continue; }      // 區域執行緒核心可能拒絕跨區讀,略過該 chunk
+                    for (Map.Entry<net.minecraft.core.BlockPos, net.minecraft.world.level.block.entity.BlockEntity> en : bes.entrySet()) {
                         net.minecraft.world.level.block.entity.BlockEntity be = en.getValue();
                         if (!(be instanceof net.minecraft.world.level.block.entity.BaseContainerBlockEntity)) continue;
                         Boolean p = null;
@@ -250,7 +254,10 @@ public final class LcOpsPlugin extends JavaPlugin implements Listener {
                 Consumer<Component> sink = c -> fb.append(PlainTextComponentSerializer.plainText().serialize(c)).append(" | ");
                 CommandSender sender = Bukkit.createCommandSender(sink);
                 boolean dispatched;
-                try { dispatched = Bukkit.dispatchCommand(sender, cmd); } catch (Throwable th) { dispatched = false; fb.append("EXC ").append(th); }
+                // ⚠ 區域執行緒核心(Folia 系)會拒絕「不擁有那個方塊的執行緒」動它:
+                // 從 console/排程執行緒直接 dispatch 會全部失敗(實測 42 條全滅、金絲雀 0/9)。
+                // 有 RegionScheduler 就把指令丟到擁有那個座標的區域執行緒上跑;沒有就照舊。
+                dispatched = dispatchOnOwningRegion(sender, cmd, tag, fb);
                 String f = fb.toString(); if (f.length() > 600) f = f.substring(0, 600) + "…";
                 t("CMDRESULT", tag, "-", 0, 0, 0, (dispatched ? "dispatched " : "notdispatched ") + "cmd=" + cmd + " feedback=" + f);
                 n++;
@@ -258,6 +265,40 @@ public final class LcOpsPlugin extends JavaPlugin implements Listener {
         } catch (Exception e) { getLogger().severe("cmds.txt: " + e); }
         getLogger().info("LCCMDS DONE n=" + n);
         try { Files.writeString(new File(getDataFolder(), "done-cmds").toPath(), String.valueOf(n)); } catch (Exception ignored) {}
+    }
+
+    /**
+     * 在「擁有目標方塊的區域執行緒」上執行指令。
+     * 原廠 Paper 沒有 RegionScheduler,反射拿不到就直接執行(行為與以前相同)。
+     */
+    private boolean dispatchOnOwningRegion(CommandSender sender, String cmd, String tag, StringBuilder fb) {
+        java.util.concurrent.atomic.AtomicBoolean ok = new java.util.concurrent.atomic.AtomicBoolean(false);
+        java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+        Runnable run = () -> {
+            try { ok.set(Bukkit.dispatchCommand(sender, cmd)); }
+            catch (Throwable th) { fb.append("EXC ").append(th); }
+            finally { done.countDown(); }
+        };
+        try {
+            String[] xyz = tag.substring(tag.indexOf(':') + 1).split(",");
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("in minecraft:([a-z_]+)").matcher(cmd);
+            Object rs = Bukkit.class.getMethod("getRegionScheduler").invoke(null);
+            if (rs != null && m.find() && xyz.length == 3) {
+                World w = world(m.group(1));
+                int cx = Integer.parseInt(xyz[0]) >> 4, cz = Integer.parseInt(xyz[2]) >> 4;
+                rs.getClass().getMethod("execute", org.bukkit.plugin.Plugin.class, World.class, int.class, int.class, Runnable.class)
+                  .invoke(rs, this, w, cx, cz, run);
+                if (!done.await(10, java.util.concurrent.TimeUnit.SECONDS)) fb.append("TIMEOUT ");
+                return ok.get();
+            }
+        } catch (NoSuchMethodException ignored) {
+            // 原廠 Paper:沒有 RegionScheduler,直接跑
+        } catch (Throwable th) {
+            fb.append("SCHED-EXC ").append(th).append(" ");
+        }
+        run.run();
+        try { done.await(1, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+        return ok.get();
     }
 
     private World world(String dim) {

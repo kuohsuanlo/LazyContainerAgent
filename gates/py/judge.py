@@ -202,9 +202,27 @@ for tag, text in cmd_lines:
         continue
     want = WANT.get(tag.split(':')[0], '')
     if 'dispatched' not in fb or (want and want not in fb): cmd_fail.append(tag + ' 回饋不對:' + fb[:100])
-(OK if not cmd_fail else F)(f"伺服器端指令 {len(cmd_lines)} 條全部回饋成功(失敗 {len(cmd_fail)})")
-for x in cmd_fail[:8]: print("       " + x)
-(OK if canary_n and canary_ok == canary_n else F)(f"金絲雀(/data get 拿得到 Items){canary_ok}/{canary_n}")
+# 有些核心(區域執行緒系)不讓外掛執行會改方塊的指令:dispatchCommand 回 true、回饋是空的、
+# 方塊完全沒變。這種情況要誠實記成「此核心不支援」,不能當成 agent 的問題——
+# 但**必須先證明它們一條都沒執行**。部分執行比全部失敗更危險,那仍然判紅。
+cmd_targets = {k: v for l in LABELS for k, v in expected.get(l, {}).items() if v.get('via') == 'cmd'}
+def _cmd_took_effect(k):
+    for l in LABELS:
+        if k in expected.get(l, {}):
+            try: r = json.load(open(f'{out}/report-mid-{l}.json'))
+            except Exception: return False
+            return any(d['key'] == k for d in r['diffs'])
+    return False
+effected = [k for k in cmd_targets if _cmd_took_effect(k)]
+all_empty_feedback = cmdres and all('feedback=' in v and v.split('feedback=')[-1].strip() == '' for v in cmdres.values())
+CMD_UNSUPPORTED = bool(cmd_targets) and not effected and all_empty_feedback
+if CMD_UNSUPPORTED:
+    W(f"這個核心不讓外掛執行會改方塊的指令:{len(cmd_lines)} 條全部沒有回饋、目標一個都沒變 "
+      f"⟹ 指令正控制與金絲雀在此核心上不適用(bot 操作與外掛 API 正控制照常判定)")
+else:
+    (OK if not cmd_fail else F)(f"伺服器端指令 {len(cmd_lines)} 條全部回饋成功(失敗 {len(cmd_fail)})")
+    for x in cmd_fail[:8]: print("       " + x)
+    (OK if canary_n and canary_ok == canary_n else F)(f"金絲雀(/data get 拿得到 Items){canary_ok}/{canary_n}")
 
 print("== 4. 裁判 輸入→中段(零容忍 + 正控制逐格斷言)==")
 def slotmap(lst): return {i: x for i, x in enumerate(lst or []) if x}
@@ -241,6 +259,8 @@ for l in LABELS:
         print(f"       非預期 {k} {d['kind']} {d.get('id')} slots={d.get('slots')} othersSame={d.get('othersSame')}")
     bad = []
     for k, ex in e.items():
+        if CMD_UNSUPPORTED and ex.get('via') == 'cmd': continue          # 指令沒執行,它的預期不成立是必然
+        if CMD_UNSUPPORTED and ex.get('assert', {}).get('equals_source'): continue   # clone 產生的 EXTRA 同理
         kind = ex['kind']; x = r['expected'].get(k); d = got.get(k)
         if kind == 'SAME':
             if d is not None and d['kind'] != 'DIFF': bad.append((k, kind, 'should be SAME but ' + d['kind'])); continue

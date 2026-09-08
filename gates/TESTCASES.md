@@ -141,6 +141,29 @@ bot 操作 5 種(`open` / `pickput` / `move` / `take` / `dig`)+ 卸載重載 + �
 `slot`+`item`、`all_empty`、`emptied`、`moved_from`+`moved_to`、`others_contains`、`equals_source`,
 **外加「沒被指定的格不准變」**。
 
+## 五之二、存檔守門(`SilentWipeGuardTest`,8 例)
+
+守的不變式:**這個容器載入時有東西、從載入到現在沒有任何存取點碰過它、存檔卻要寫出空的。**
+正常運作下不可能成立 —— 沒被碰過的容器是把載入時收下的原始位元組原樣寫回去的;而任何合法的取走
+(玩家、漏斗、比較器、外掛、指令)都必須先走 `getItems()/getContents()`,那就會把 `accessed` 設起來。
+
+誤報比漏報更糟(把玩家正當取走的東西寫回去 = 複製),所以五個負向案例的份量比正向多。
+
+| 測試 | 守什麼 |
+|---|---|
+| `wipedButRawStillThere` | raw 還在 ⟹ 當場寫回原始五格,`silentWipeHealed` +1 |
+| `wipedAfterMaterialization` | raw 已被物化吃掉 ⟹ 救不回來,但**不寫出空的 Items**,`silentWipe` +1 且 healed 不加 |
+| `alarmTripsSafeMode` | 報警同時就地降級:`passthrough()` 之後恆為 false(不必重啟) |
+| `legitimateEmptyingIsSilent` | 玩家經 `getItems()` 取光 ⟹ 安靜,照常寫出空清單 |
+| `loadedEmptyIsSilent` | 載入時本來就是空的 ⟹ 安靜 |
+| `setItemsIsSilent` | `setItems` 整批換清單(GUARD_CLEAR)⟹ 安靜 |
+| `partiallyEmptiedIsSilent` | 還剩一格有東西 ⟹ 安靜(守門只管全空) |
+| `reentrantEnsureDoesNotCountAsAccess` | `ensure()` 內部呼叫 `this.getItems()` 會再走一次 leaf guard;若把它算成存取,守門對每個物化過的容器永久失效 |
+
+成本:熱路徑只有兩個 boolean 讀。`loadedNonEmpty` 在載入時由 `rawListIsEmpty` 讀 6 個 byte 的
+ListTag 表頭算出(不解析);`accessed` 是一個 volatile 寫,而且只在 `pending` 還是 true 時走得到
+(每個容器每次載入至多一次)。解碼只發生在報警分支,那條路正常應該永遠不會執行。
+
 ## 六、離線比對判定
 
 - `structcmp.py`:每份輸出「時間戳真的變過的 chunk ≥90%」(反空洞)+ 五個版本兩兩結構比對
@@ -155,6 +178,8 @@ bot 操作 5 種(`open` / `pickput` / `move` / `take` / `dig`)+ 卸載重載 + �
 | 缺口 | 現況 |
 |---|---|
 | 壞 bytes 的終局處理(`onBadRaw` 落檔 / fallback / chunk 照常落盤) | `malformedRawThrowsRuntimeNotIoException` 守住「例外型別」這一半;**落檔與 fallback 這條路徑目前沒有測試案例**,只有 G4/G7 驗 `badRaw=0`(即真實資料上不該發生) |
+| 存檔守門攔不到「有人碰過之後才被清空」 | 不變式的前提就是「沒人碰過」。外掛先 `getInventory()` 再清空,對 agent 而言與玩家取光無法區分 ⟹ 要靠外部的 `tools/container_loss_watch.py` 對帳,不是靠這一關 |
+| 自動降級只關直寫,不關延遲載入 | 直寫(#261)是最年輕、最沒有生產里程的一層,先關它;延遲載入從 26.2-1 就在跑。要整個停用仍然只能換 jar |
 | `-Dlazycontainer.summary=false` / `-Dlazycontainer.attribution=false` | 兩支 kill switch 沒有專屬測試 |
 | `tools/LazyModelCheck.java` | 401 行的窮舉小模型探索器,不被任何 gate 執行(研究用,留著當文件) |
 | EndRod / Folia 系核心 | 所有實機關卡跑在 Paper 上;跨 region 執行緒那一層只有 `EnsureRaceTest` 與 javap 簽章比對,**沒有 EndRod 實機關卡** |

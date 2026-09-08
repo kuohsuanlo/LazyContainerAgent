@@ -20,10 +20,16 @@ flags_of() {
 }
 cp "$LC_REPO/target/LazyContainerAgent.jar" "$LC_RIG/" || exit 1
 [ -f "${LC_CHUNKGUARD_JAR:-/nonexistent}" ] && cp "$LC_CHUNKGUARD_JAR" "$LC_RIG/ChunkGuardAgent.jar"
+# 收機械事件證據:核心不支援 tick freeze 時,世界會邊比邊動,要能分辨「誰動的」。
+# 支援 freeze 的核心上這支外掛不會記到任何東西,無害。
+bash "$LC_LIB_DIR/plugins/build.sh" >/dev/null 2>&1 || warn "測試外掛編譯失敗,將沒有機械事件證據"
+rm -rf "$LC_RIG/plugins/LcOps"; mkdir -p "$LC_RIG/plugins/LcOps"
+cp "$LC_LIB_DIR/plugins/lcops/LcOps.jar" "$LC_RIG/plugins/" 2>/dev/null
+awk '{print $2, $4, $5}' "$LC_FIXTURES_DIR/fixtures.tsv" > "$LC_RIG/plugins/LcOps/regions.txt"
 for m in $MODES; do
   echo "== G4 模式 $m =="
   rig_kill
-  rm -f "$LC_RIG"/lc-badraw-*
+  rm -f "$LC_RIG"/lc-badraw-* "$LC_RIG/plugins/LcOps/machinery.tsv"
   while read -r label dim reg rx rz; do
     w="$(world_dir "$dim")"; mkdir -p "$w/region" "$w/entities" "$w/poi"
     rm -f "$w/region/$reg.mca" "$w/entities/$reg.mca" "$w/poi/$reg.mca"
@@ -35,13 +41,14 @@ for m in $MODES; do
     grep -aE "passthrough armed|spliced|transformed leaf|hooked .* hopper|agent installed|ChunkGuard\] armed" "$E/$m.console" | sed 's/^ *//'
     echo "transform_failed=$(grep -ac 'transform failed' "$E/$m.console") circularity=$(grep -ac ClassCircularityError "$E/$m.console")"
   } > "$E/$m.boot"
-  rig_send "tick freeze" 2
+  try_freeze "$E/$m.console" || true
   while read -r label dim reg rx rz; do forceload_region "$dim" "$rx" "$rz"; done < "$LC_FIXTURES_DIR/fixtures.tsv"
   if [ "$m" = "V" ]; then sleep 240; else wait_stash 1000 || warn "[$m] stash 沒有穩定下來"; fi
   rig_send "save-all flush" 2; sleep 40
   stats_line > "$E/$m.counters"
   rig_send "forceload remove all" 2; rig_send "stop" 2; sleep 45; rig_kill
   cp "$LC_RIG/logs/latest.log" "$E/$m.log" 2>/dev/null
+  cp "$LC_RIG/plugins/LcOps/machinery.tsv" "$E/$m.machinery.tsv" 2>/dev/null || : > "$E/$m.machinery.tsv"
   while read -r label dim reg rx rz; do mkdir -p "$E/$m/$label"; cp "$(world_dir "$dim")/region/$reg.mca" "$E/$m/$label/$reg.mca"; done < "$LC_FIXTURES_DIR/fixtures.tsv"
   # ── 每個模式的閘門 ──
   ctrs=$(cat "$E/$m.counters"); echo "     counters: ${ctrs:-(原版無計數)}"
@@ -58,6 +65,11 @@ for m in $MODES; do
     [ "${el:-1}" = 0 ] && ok "[$m] eagerLoad=0" || fail "[$m] eagerLoad=$el"
     [ "${sm:-1}" = 0 ] && ok "[$m] shadowMismatch=0" || fail "[$m] shadowMismatch=$sm"
     [ "${mm:-1}" = 0 ] && ok "[$m] summaryMismatch=0" || fail "[$m] summaryMismatch=$mm"
+    # 存檔守門:載入時有東西、沒人碰過、卻要寫出空的。正常運作下恆為 0;非 0 就是資料事故。
+    sw=$(ctr "$ctrs" silentWipe); sw=${sw%%/*}
+    [ "${sw:-1}" = 0 ] && ok "[$m] silentWipe=0(無靜默清空)" || fail "[$m] silentWipe=$sw —— 有容器在沒人碰的情況下被清空"
+    nsm=$(grep -ac 'SAFE MODE' "$E/$m.log" || true)
+    [ "${nsm:-1}" = 0 ] && ok "[$m] 未觸發自動降級" || fail "[$m] 觸發了 SAFE MODE($nsm 行)"
   fi
   case "$m" in
     A)
@@ -81,7 +93,8 @@ for m in $MODES; do
   esac
 done
 echo "== G4 結構比對 =="
-python3 "$LC_LIB_DIR/py/structcmp.py" "$LC_FIXTURES_DIR" "$E" "$(echo $MODES | tr ' ' ',')" > "$E/structcmp.txt" 2>&1
+cat "$E"/*.machinery.tsv 2>/dev/null | awk -F'\t' '{print $2}' | sort -u > "$E/machinery-all.txt"
+python3 "$LC_LIB_DIR/py/structcmp.py" "$LC_FIXTURES_DIR" "$E" "$(echo $MODES | tr ' ' ',')" "$E/machinery-all.txt" > "$E/structcmp.txt" 2>&1
 rc=$?; sed 's/^/     /' "$E/structcmp.txt"
 [ $rc -eq 0 ] && ok "四模式與輸入結構完全相等" || fail "結構比對有差(見 $E/structcmp.txt)"
 tier_verdict

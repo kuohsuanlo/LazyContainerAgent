@@ -23,3 +23,8 @@ __pycache__/
 gates/out/
 gates/plugins/*/out/
 gates/plugins/*/*.jar
+
+# fork 專屬的設定與指紋不進 git(正式站核心可能是自家 fork)
+gates/shape/*-fork*.txt
+gates/versions/*-fork*.env
+gates/versions/*-local.env

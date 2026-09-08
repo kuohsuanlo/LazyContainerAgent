@@ -96,7 +96,7 @@ class EnsureRaceTest {
         @Override
         protected NonNullList<ItemStack> getItems() {
             if (this.lazycontainer$pending) {          // = GUARD_ENSURE
-                this.lazycontainer$ensure();
+                this.lazycontainer$ensureAccessed();
             }
             Runnable h = hook.getAndSet(null);
             if (h != null) {

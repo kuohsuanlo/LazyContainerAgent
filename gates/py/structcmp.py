@@ -12,6 +12,11 @@ def _scan(path):
     return path, nbtscan.scan(path)
 
 FX, OUT, modes = sys.argv[1], sys.argv[2], sys.argv[3].split(',')
+# 可選第 4 參數:機械碰過的位置(有事件證據)。核心不支援 tick freeze 時,世界會邊比邊動,
+# 只有這些位置的差異算「可解釋」;其餘一律零容忍。
+EXCL = set()
+if len(sys.argv) > 4 and os.path.exists(sys.argv[4]):
+    EXCL = set(x.strip() for x in open(sys.argv[4]) if x.strip())
 fails = []
 census = json.load(open(os.path.join(FX, 'census.json')))
 for label in census:
@@ -43,14 +48,18 @@ for label in census:
             X, Y = scans[a], scans[b]
             common = [k for k in X if k in Y]
             miss = [k for k in X if k not in Y]; extra = [k for k in Y if k not in X]
-            dif = [k for k in common if X[k][1] != Y[k][1]]   # [1] 是結構雜湊(canon 後才算)
+            dif_all = [k for k in common if X[k][1] != Y[k][1]]   # [1] 是結構雜湊(canon 後才算)
+            dif = [k for k in dif_all if k not in EXCL]
+            machined = len(dif_all) - len(dif)
             good = not dif and not miss and not extra
             # V(原版對照組)只是參考:原版是「解成 ItemStack 再重編碼」,會丟掉 Slot 越界、
             # 未知 id、count 超範圍之類的 entry。那是原版的正規化,不是 agent 的差異——
             # 出現差異反而證明 agent 保住了原版會丟掉的東西。所以帶 V 的比較只報告、不判紅。
             ctrl = 'V' in (a, b)
             tag = ('OK  ' if good else ('INFO' if ctrl else 'FAIL'))
-            print(f"{tag} [{label}] {a} vs {b}:共同 {len(common)} 結構不同 {len(dif)} 只在前者 {len(miss)} 只在後者 {len(extra)}"
+            print(f"{tag} [{label}] {a} vs {b}:共同 {len(common)} 結構不同 {len(dif)}"
+                  + (f"(另有 {machined} 個有機械事件證據)" if machined else "")
+                  + f" 只在前者 {len(miss)} 只在後者 {len(extra)}"
                   + ("   ← 原版對照組,差異僅供參考" if ctrl and not good else ""))
             for k in dif[:3]: print(f"       結構不同 @ {k} {X[k][0]}")
             for k in (miss[:3] + extra[:3]): print(f"       只有一邊有 @ {k}")

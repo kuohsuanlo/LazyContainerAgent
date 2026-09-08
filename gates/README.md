@@ -49,6 +49,35 @@ i=0; find libraries -name '*.jar' | while read j; do cp "$j" "nms-lib/lib-$i-$(b
 檔名有隱含契約:`build.sh` / `test.sh` 用 `ls nms-lib/*mojmap*.jar nms-lib/paper-*.jar | head -1` 認 server jar,
 其餘視為 libraries。G0 會驗 jar 數 ≥50。
 
+### 對 fork 核心跑(Folia 系、自家 fork)
+
+正式站跑的常常不是原廠 Paper,而是自家 fork。**那才是真正要驗的核心**——注入是織進核心內部類別的,
+fork 動過那些類別就會壞,而且壞法可能是靜默的。
+
+fork 不需要改任何 gate 程式碼,只要把幾個變數指過去(建議寫成一支 `env.sh` 放在 repo 外面):
+
+```bash
+export LC_RIG=$LC_GATE_HOME/rig-<fork>        # 獨立的測試台,不要跟原廠那台共用
+export LC_RIG_PORT=25650                      # 不同埠,可以跟原廠那輪同時跑
+export LC_TMUX=lc<fork>                       # 不同 tmux session
+export LC_PAPER_BUNDLER=/path/to/<fork>.jar   # fork 的 server jar(bundler 形式)
+export LC_NMS_JAR=$LC_GATE_HOME/<fork>/nms.jar  # 見下面怎麼取
+bash gates/rig/make_rig.sh                    # 用 fork 的 jar 建測試台
+bash gates/run.sh --tiers G0,G2,G4,G5,G6,G7 --keep-fixtures
+```
+
+**取 fork 的 NMS jar**:bundler 跑一次 `--version` 之後,核心會被解到 `<rig>/versions/<版本>/*.jar`,
+把那支複製出來即可。**注入形狀基準沿用原廠那份**——這樣 G2 就變成「fork 有沒有動到我注入的地方」的直接答案:
+
+- **0 差異** = fork 沒碰任何注入假設,原廠驗過的結論可以延伸過來
+- **有差異** = 每一行都要看,fork 動到的地方就是要重新驗的地方
+
+G1(建置)與 G3(單元測試)不必用 fork 的 NMS 跑——它們驗的是編譯與語意,對原廠 NMS 跑就夠;
+真正要用 fork 核心跑的是 G2 與 G4–G7。
+
+> fork 的路徑、指紋、跑出來的產物**都不要進這個 repo**。`gates/shape/` 只收原廠基準;
+> fork 的設定檔與指紋放 `$LC_GATE_HOME` 底下即可。
+
 ### 沒有艦隊存取怎麼辦(自備素材)
 
 預設是從艦隊主機 `scp` 正式站 region 的唯讀副本,**跑完就刪**。別台機器沒有那個存取時:
@@ -72,7 +101,7 @@ mkdir -p $LC_GATE_HOME/fixtures/w1 && cp <你的世界>/region/r.0.0.mca $LC_GAT
 | **G0** 環境/版本 | 拿錯 JDK、拿錯核心 jar、少裝工具 —— 這關沒過,後面每一關的紅綠都不能信 | 無 | 10 秒 | JDK major、核心 `version.json`、NMS classfile major、Via 外掛、素材來源可連 |
 | **G1** 建置 + 政策閘門 | 編得出來;注入形狀沒違反跨執行緒鎖政策 | 無 | 40 秒 | `build.sh` 綠、template classfile major 對得上、`LockPolicyCheck` 違規 0、jar/pom 版本字串一致 |
 | **G2** 注入形狀 diff | **換版最重要的一關**:目標版 NMS 的形狀指紋與基準逐行比對 | NMS jar | 20 秒 | 消失 0 **且新增 0**(新增的行同樣要人看過) |
-| **G3** 差分/併發單元 | 語意:摘要 vs 真 codec、物化的跨執行緒視窗、直寫框架與走訪器、component partial、對帳告警 | 無(headless NMS) | 90 秒 | 64 個測試全綠、六個測試類別都真的有跑(清單見 [`TESTCASES.md`](TESTCASES.md)) |
+| **G3** 差分/併發單元 | 語意:摘要 vs 真 codec、物化的跨執行緒視窗、直寫框架與走訪器、component partial、對帳告警、存檔守門 | 無(headless NMS) | 90 秒 | 72 個測試全綠、七個測試類別都真的有跑(清單見 [`TESTCASES.md`](TESTCASES.md)) |
 | **G4** 存檔四模式 E2E | 磁碟輸出:原版 / 直寫 / 關直寫 / 直寫觀測 四種跑法的結果必須「結構相等」 | 真實 region ×3 | 35 分鐘 | 四模式互比零結構差、各模式計數器達標、**`rawEmit ≥ 0.99×rawPassthrough`** |
 | **G5** 逐格裁判 | 遊戲看到的物品:在真伺服器裡逐容器逐格 `ItemStack.matches` | G4 的輸出 | 8 分鐘 | 逐格差異 0、缺少/多出 0、物品多重集合相同、未被碰的容器 Items 結構原封 |
 | **G6** 摘要/影子對抗 | 執行中的語意:漏斗真的去問摘要、真解碼當即時神諭 | 真實 region ×3 | 10 分鐘 | `shadowMismatch=0`、`summaryMismatch=0`、**摘要真的被問過**(`summaryFull+summarySkip>0`) |
@@ -137,6 +166,8 @@ mkdir -p $LC_GATE_HOME/fixtures/w1 && cp <你的世界>/region/r.0.0.mca $LC_GAT
 | **直寫觀測模式** `passthrough.shadow` | `03926b6` | 上線前一天用真路徑對帳:磁碟照舊寫解析出的樹,直寫只做探針 | G4 模式 C | `ptShadowOk` 大量、`ptShadowMismatch=0`、`rawPassthrough=0` | G4 |
 | **`BAD RAW` log 格式 + 看門貓整合** | `7cdd04f` | 面板的區塊救援偵測器要能從 log 定位並自動建案 | 面板 `chunkguard.py` 的 `HIT_RE` | 行內含 `minecraft:<維度> chunk (cx, cz) block x, y, z` | 面板端(不在本 gate) |
 | **直寫對帳告警 `rawEmit`** | 26.2-6(本次新增) | **換版唯一「不會自己爆」的失效模式**:三個 hook 都 armed、`attachRaw` 成功、`rawPassthrough` 照加,但核心若在存檔鏈中途重建 CompoundTag,側車會被靜默丟掉 ⟹ 箱子存成空。唯一外顯訊號就是「掛上去的次數」追不上「真的寫出去的次數」 | `PassthroughDeficitTest` 四例(側車全丟要告警 / 正常 IO 落後 / 爆量存檔連續落後 / 一次性尖峰,後三者都不得告警) | `rawEmit ≥ 0.99×rawPassthrough`;**已經沒有新的側車掛上去、差額卻連續數輪追不上**才印 `BAD PASSTHROUGH`(第一版判準只看「差額不降」,大批存檔當下就誤報——G4 實測抓到) | G3、G4-A、G7 |
+| **存檔守門(靜默清空)+ 自動降級** | 26.2-7(本次新增) | 2026-09-08 s3 商場單一 chunk 內 154 個容器同時歸零(面板 #121)。當時 agent 對「內容在沒人碰的情況下消失」零偵測能力:寫到磁碟上的是一個結構完全合法的空清單,只能靠備份事後對帳。守門把它變成**存檔當下就叫的警報**,並在原始 bytes 還在時當場寫回去,同時就地關掉直寫(之後全走解析路徑,不必重啟) | `SilentWipeGuardTest` 八例:三正向(raw 還在→自救、raw 已被物化吃掉→拒寫空的、報警要降級)、五負向(玩家正當取光 / 載入時本來就空 / setItems 換清單 / 還有東西 / 物化重入)全部必須安靜 | 熱路徑只有兩個 boolean 讀,沒有任何解碼;`silentWipe=0/0` 且 log 無 `SILENT WIPE`、無 `SAFE MODE` | G3、G4 |
+| **外部流失偵測 `tools/container_loss_watch.py`** | 26.2-7(本次新增) | agent 自己出錯時,它的自我回報也不能信。這支只吃兩份 region 檔(通常是每日備份 vs 線上),以 chunk 為單位找「上一份有東西、這一份變空」的容器 —— 不看 log、不問計數器 | 拿 s3 事故的備份/損壞兩份 region 實跑:命中 chunk (196, -198),歸零 154 個、流失 4,861,635 件 | 超過門檻回離開碼 1(給 cron 判斷發不發警報) | 手動/cron |
 | **還原工具 `tools/mca_restore.py`** | `03926b6` | 真出事要救得回來:純位元組拼接、不重新編碼(重寫等於在每個欄位上重賭一次) | G7 對每份輸出跑 `verify --deep` | 「沒有發現問題」;寫入前確認 `session.lock` 沒被鎖、沒有程序開著該檔、先備份 | G7 |
 
 ### 六、觀測與決策證據(#223)
@@ -155,6 +186,7 @@ mkdir -p $LC_GATE_HOME/fixtures/w1 && cp <你的世界>/region/r.0.0.mca $LC_GAT
 | `-Dlazycontainer.shadow=true` | 影子驗證:輸出等同原版、只回報不改資料 | G6 |
 | `-Dlazycontainer.passthrough=false` | 關掉存檔直寫(回 26.2-2 舊路徑) | G4 模式 B |
 | `-Dlazycontainer.passthrough.shadow=true` | 直寫觀測模式 | G4 模式 C |
+| (無旗標)自動降級 SAFE MODE | 偵測到靜默清空或壞 raw 就**就地**關閉直寫,之後每次存檔都走解析路徑;重啟才恢復 | G3、G4 |
 | `-Dlazycontainer.summary=false` | 關掉漏斗摘要快答 | (手動;G6 是開著驗) |
 | `-Dlazycontainer.attribution=false` | 關掉歸因(stats 印 `attribution=off`) | — |
 | `-Dlazycontainer.verbose[.ms]` | 計數器輸出 | 每一關都靠它讀計數 |

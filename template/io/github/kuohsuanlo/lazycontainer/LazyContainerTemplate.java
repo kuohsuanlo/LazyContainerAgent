@@ -129,6 +129,20 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
      */
     public int lazycontainer$rawOk;
 
+    /**
+     * 載入時這個容器的 raw 是否「非空」(至少有一筆 entry)。
+     * <p>用途只有一個:存檔守門(見 {@link #lazycontainer$guardEmptyWrite}) —— 「載入時有東西」是判斷
+     * 「這次寫出空的是不是異常」的前提。與摘要無關,摘要可能整份棄答,這個旗標永遠可信。</p>
+     */
+    public boolean lazycontainer$loadedNonEmpty;
+
+    /**
+     * 這個容器有沒有被<b>外部</b>存取過(玩家開箱、漏斗抽、比較器讀、外掛 API、指令)。
+     * <p>由 leaf 的 guard 入口設,<b>不</b>由存檔路徑自己的 ensure 設。沒被存取過的容器,它的內容
+     * 不可能被合法拿走 —— 拿東西一定要先存取它。</p>
+     */
+    public volatile boolean lazycontainer$accessed;
+
     /** 永不被呼叫;僅為通過編譯。splice 時不會嫁接 {@code <init>}。 */
     protected LazyContainerTemplate(BlockEntityType<?> type, BlockPos pos, BlockState st) {
         super(type, pos, st);
@@ -151,6 +165,10 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
     public synchronized void lazycontainer$load(ValueInput input, NonNullList<ItemStack> items) {
         this.lazycontainer$sumState = 0;    // 換了新 raw,舊摘要作廢
         this.lazycontainer$rawOk = 0;       // 換了新 raw,舊的直寫判定作廢
+        // 存檔守門的兩個前提每次載入都要歸零:eager 退路(非 TagValueInput、encode 失敗)也會走到這裡,
+        // 若沿用上一輪的 loadedNonEmpty=true / accessed=false,下次存檔會誤判成靜默清空。
+        this.lazycontainer$loadedNonEmpty = false;
+        this.lazycontainer$accessed = false;
         if (input instanceof TagValueInput) {
             Tag itemsTag = ((TagValueInput) input).input.get("Items");
             byte[] encoded;
@@ -164,6 +182,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                 return;
             }
             this.lazycontainer$raw = encoded;
+            this.lazycontainer$loadedNonEmpty = encoded != null && !LazyContainerRuntime.rawListIsEmpty(encoded);
             // 摘要 eager 建置:樹此刻還在(免 parse);查詢端不再 lazy build(sumState==0 一律當「不知道」)
             if (LazyContainerRuntime.summary()) {
                 long packed;
@@ -313,6 +332,20 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
      * </ul>
      * <p>成本:已物化容器的熱路徑只有 guard 的一個 volatile 讀,不進本方法;本方法每容器每次載入至多執行一次。</p>
      */
+    /**
+     * leaf 的 guard 入口(getItems/getContents 等)專用:標記「被外部存取過」之後再物化。
+     * <p>與 {@link #lazycontainer$ensure()} 的差別只有這個旗標 —— 存檔路徑自己的 fallback 呼叫的是
+     * ensure(),不會設旗標,所以「沒人碰過」這個前提才站得住。</p>
+     */
+    public void lazycontainer$ensureAccessed() {
+        if (this.lazycontainer$ensuring != Thread.currentThread()) {
+            // 重入不算外部存取:ensure 在 monitor 內呼叫 this.getItems() 取清單給 loadAllItems 填,
+            // 那一次會再走一遍 leaf guard 進到這裡。若把它算成存取,每個容器一物化就永遠豁免守門。
+            this.lazycontainer$accessed = true;
+        }
+        this.lazycontainer$ensure();
+    }
+
     public void lazycontainer$ensure() {
         if (!this.lazycontainer$pending) {
             return;                                     // volatile 讀:false ⟹ 清單已完整(見上證明)
@@ -397,6 +430,9 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
     public synchronized void lazycontainer$clear() {
         this.lazycontainer$pending = false;
         this.lazycontainer$raw = null;
+        // setItems(整批換清單)也是一次正當的外部存取 ⟹ 「沒人碰過」的前提就此作廢,存檔守門不再介入。
+        // loadAdditional/loadFromTag 走的也是這條,但緊接著的 lazycontainer$load 會把旗標重新歸零。
+        this.lazycontainer$accessed = true;
     }
 
     // ── 存檔 redirect 目標(取代 leaf saveAdditional 內的 ContainerHelper.saveAllItems 呼叫)──
@@ -413,12 +449,18 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         if (this.lazycontainer$trySaveRaw(output, true)) {
             return;
         }
+        if (this.lazycontainer$guardEmptyWrite(output, items, true)) {
+            return;
+        }
         ContainerHelper.saveAllItems(output, items);
     }
 
     /** 取代 {@code ContainerHelper.saveAllItems(output, items, false)}(allowEmpty=false:shulker)。 */
     public synchronized void lazycontainer$saveNoEmpty(ValueOutput output, NonNullList<ItemStack> items) {
         if (this.lazycontainer$trySaveRaw(output, false)) {
+            return;
+        }
+        if (this.lazycontainer$guardEmptyWrite(output, items, false)) {
             return;
         }
         ContainerHelper.saveAllItems(output, items, false);
@@ -432,6 +474,57 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
      *
      * @param allowEmpty 對應 vanilla saveAllItems 的 allowEmpty(shadow 模式用以算出 byte-identical 的 eager 結果)
      */
+    /**
+     * 存檔守門:攔截「載入時有東西、從頭到尾沒人碰過、現在卻要寫出空的」這種寫入。
+     *
+     * <p><b>為什麼這個條件在正常運作下不可能成立</b>:沒被存取過的容器,agent 是把載入時收下的原始
+     * 位元組原樣寫回去的,不可能變空;而任何合法的取走(玩家、漏斗、比較器、外掛、指令)都必須先
+     * 存取它,那就會把 {@code accessed} 設起來。所以這個條件一旦成立,就代表內容在沒有人動它的情況下
+     * 消失了 —— 那是資料事故,不是玩法。</p>
+     *
+     * <p>攔到之後做兩件事:<b>先自救</b> —— raw 還在就把原始 bytes 寫回去(等同從沒發生);
+     * 然後<b>大聲報警</b>,格式與 BAD RAW 一致,面板的區塊救援偵測器抓得到。raw 已經不在時無法自救,
+     * 但仍然報警,並且<b>不寫出那個空清單</b>(讓呼叫端的 Items 欄位維持不存在,比寫成空更接近「不要動它」)。</p>
+     *
+     * @return true = 已經處理完(呼叫端不要再寫);false = 正常情況,照舊寫
+     */
+    private boolean lazycontainer$guardEmptyWrite(ValueOutput output, NonNullList<ItemStack> items, boolean allowEmpty) {
+        if (!this.lazycontainer$loadedNonEmpty || this.lazycontainer$accessed) {
+            return false;                                   // 沒東西可掉,或有人正當地動過它
+        }
+        if (this.lazycontainer$rawOk == 2) {
+            return false;                                   // 壞 bytes 終局:onBadRaw 已經報過警並落檔,不重複報
+        }
+        for (int i = 0; i < items.size(); i++) {
+            if (!items.get(i).isEmpty()) {
+                return false;                               // 還有東西,不是全空
+            }
+        }
+        byte[] rawBytes = this.lazycontainer$raw;
+        String pos = this.lazycontainer$posForLog();
+        if (rawBytes != null && output instanceof TagValueOutput
+                && LazyContainerRuntime.rawIsListTag(rawBytes) && this.lazycontainer$rawOk != 2) {
+            CompoundTag out = ((TagValueOutput) output).buildResult();
+            out.remove("Items");
+            if (LazyContainerRuntime.attachRaw(out, "Items", rawBytes)) {
+                LazyContainerRuntime.onSilentWipe(pos, true);
+                return true;                                // 自救成功:寫回原始 bytes
+            }
+            try {
+                Tag revived = lazycontainer$decodeRaw(rawBytes);
+                if (revived instanceof ListTag && !((ListTag) revived).isEmpty()) {
+                    out.put("Items", revived);
+                    LazyContainerRuntime.onSilentWipe(pos, true);
+                    return true;                            // 自救成功:解回原始樹
+                }
+            } catch (Throwable ignored) {
+                // 解不開就走下面的「只報警」
+            }
+        }
+        LazyContainerRuntime.onSilentWipe(pos, false);
+        return true;                                        // 救不回來,但絕不主動寫出空的
+    }
+
     private boolean lazycontainer$trySaveRaw(ValueOutput output, boolean allowEmpty) {
         if (!this.lazycontainer$pending) {
             return false;

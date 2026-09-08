@@ -224,8 +224,39 @@ public final class LazyContainerRuntime {
 
     private static final boolean PASSTHROUGH = !"false".equalsIgnoreCase(System.getProperty("lazycontainer.passthrough"));
 
+    /**
+     * 自動降級旗標。偵測到「內容在沒人碰的情況下消失」(靜默清空)或「自家 raw bytes 解不開」時就地翻起來,
+     * 之後 {@link #passthrough()} 恆為 false ⟹ 每次存檔都走完整解析路徑(= 26.2-2 的行為,已在正式站跑過的那條)。
+     * <p>為什麼是「就地關掉」而不是「排一個非同步任務去修」:存檔是一次性的,寫出去就是磁碟上的事實,
+     * 沒有事後補救的視窗。但降級本身零成本 —— 只是一個 volatile 讀,之後的容器改走解析路徑,不需要重啟、
+     * 不需要停服、也不會卡住正在跑的那次存檔。重啟才會恢復直寫。</p>
+     */
+    private static volatile boolean SAFE_MODE;
+    private static final java.util.concurrent.atomic.AtomicBoolean SAFE_TRIPPED =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
     public static boolean passthrough() {
-        return PASSTHROUGH;
+        return PASSTHROUGH && !SAFE_MODE;
+    }
+
+    public static boolean safeMode() {
+        return SAFE_MODE;
+    }
+
+    /** 出事時就地降級:直寫關閉,之後一律解析路徑。可重複呼叫(只印一次)。 */
+    public static void tripSafeMode(String why) {
+        SAFE_MODE = true;
+        if (SAFE_TRIPPED.compareAndSet(false, true)) {
+            System.err.println("[LazyContainer] SAFE MODE —— " + why
+                    + ";已就地關閉存檔直寫(passthrough),之後每一次存檔都走完整解析路徑。"
+                    + "伺服器不需要重啟即已生效;重啟後會恢復直寫,所以請把這一行回報上來。");
+        }
+    }
+
+    /** 只給測試用:把自動降級歸零。正式執行期沒有任何呼叫點。 */
+    static void resetSafeModeForTests() {
+        SAFE_MODE = false;
+        SAFE_TRIPPED.set(false);
     }
 
     /** 走 passthrough 的存檔次數(rawSave 的子集)。 */
@@ -370,6 +401,38 @@ public final class LazyContainerRuntime {
     /** raw 連 vanilla 讀取端都拒收(絕不寫進 chunk);正常應恆為 0。 */
     public static final java.util.concurrent.atomic.LongAdder badRaw = new java.util.concurrent.atomic.LongAdder();
 
+    /**
+     * 「靜默清空」攔截次數:載入時有東西、從頭到尾沒人碰過、存檔卻要寫出空的。
+     *
+     * <p>這個條件在正常運作下不可能成立(沒被存取過的容器是原樣寫回去的;任何合法取走都必須先存取它),
+     * 所以它是資料事故的直接訊號,而且不會被正常玩法誤觸。攔到就先自救(寫回原始 bytes),救不回來也
+     * 絕不寫出空的。</p>
+     *
+     * <p>正常恆為 0。>0 就代表**曾經差點掉東西**,一定要查。</p>
+     */
+    public static final java.util.concurrent.atomic.LongAdder silentWipe = new java.util.concurrent.atomic.LongAdder();
+    public static final java.util.concurrent.atomic.LongAdder silentWipeHealed = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.AtomicInteger WIPE_LOGGED = new java.util.concurrent.atomic.AtomicInteger();
+
+    /**
+     * @param pos    容器位置(格式與 BAD RAW 一致,面板的區塊救援偵測器抓得到)
+     * @param healed true = 已用原始 bytes 救回;false = 救不回來,但沒有寫出空的
+     */
+    public static void onSilentWipe(String pos, boolean healed) {
+        silentWipe.increment();
+        if (healed) {
+            silentWipeHealed.increment();
+        }
+        tripSafeMode("容器 " + pos + " 出現靜默清空");
+        if (WIPE_LOGGED.incrementAndGet() <= 200) {
+            System.err.println("[LazyContainer] SILENT WIPE " + pos
+                    + " —— 這個容器載入時有東西、全程沒有任何人存取過,存檔卻要寫出空的。"
+                    + (healed ? "已用載入時的原始 bytes 救回,資料沒有損失。"
+                              : "原始 bytes 已不在,無法救回,但已阻止寫出空清單。")
+                    + " 這在正常運作下不可能發生,請立刻回報並保留這一行。");
+        }
+    }
+
     /** shadow 完整讀回的大小上限(超過只計數):避免在 tick 執行緒上為單一巨型容器多做一次完整解析。 */
     public static final int PT_SHADOW_MAX_BYTES = Integer.getInteger("lazycontainer.passthrough.shadow.maxBytes", 512 * 1024);
     /** shadow 讀回的 accounter 預算(有界:框架若錯位,壞掉的長度欄位可能要求配置數 GB)。 */
@@ -394,6 +457,7 @@ public final class LazyContainerRuntime {
     public static void onBadRaw(String pos, byte[] raw, String why) {
         badRaw.increment();
         rawWalkReject.increment();
+        tripSafeMode("容器 " + pos + " 的 raw bytes 解不開");
         if (rawWalkLogN.incrementAndGet() <= 30) {
             System.err.println("[LazyContainer] BAD RAW @ " + pos + " (" + (raw == null ? 0 : raw.length)
                     + " bytes) — " + why + " — this container falls back to vanilla encode; bytes dumped for recovery");
@@ -876,6 +940,8 @@ public final class LazyContainerRuntime {
                 + " rawWalk=" + rawWalk.sum()
                 + " rawWalkMaxMs=" + (rawWalkMaxNanos.get() / 1_000_000L)
                 + " badRaw=" + badRaw.sum()
+                + " silentWipe=" + silentWipe.sum() + "/" + silentWipeHealed.sum()
+                + (SAFE_MODE ? " SAFEMODE" : "")
                 + (PASSTHROUGH_SHADOW
                         ? " ptShadowOk=" + ptShadowOk.sum() + " ptShadowMismatch=" + ptShadowMismatch.sum()
                             + " ptShadowSkipped=" + ptShadowSkipped.sum()
