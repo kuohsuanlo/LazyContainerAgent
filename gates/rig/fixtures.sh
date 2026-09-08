@@ -24,7 +24,14 @@ for f in $(fixtures_each); do
       echo "自備素材模式:缺 $dst —— 請自己把目標版本的 region 檔放到這個路徑(檔名必須是 r.<x>.<z>.mca)"; exit 1
     fi
     echo "== 取素材 $label $dim $reg"
-    scp -q "$LC_FLEET_HOST:$remote" "$dst" || { echo "取不到 $remote"; exit 1; }
+    # 重試三次:scp 對正在被伺服器改寫的大檔偶爾會吐 "protocol error: filename does not match
+    # request"(2026-09-09 實測踩到一次)。一次網路抖動不該把一小時的 gate 整輪弄掉。
+    ok=0
+    for try in 1 2 3; do
+      if scp -q "$LC_FLEET_HOST:$remote" "$dst"; then ok=1; break; fi
+      echo "   第 $try 次取檔失敗,5 秒後重試"; rm -f "$dst"; sleep 5
+    done
+    [ "$ok" = 1 ] || { echo "取不到 $remote(重試三次都失敗)"; exit 1; }
   fi
   printf '%s\t%s\t%s\t%s\t%s\n' "$label" "$dim" "$reg" "$(fx_rx "$f")" "$(fx_rz "$f")" >> "$LC_FIXTURES_DIR/fixtures.tsv"
   ls -l "$dst" | awk '{print "   ", $NF, $5, "bytes"}'

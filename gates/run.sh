@@ -59,7 +59,15 @@ for t in $(echo "$TIERS" | tr ',' ' '); do case "$t" in G4|G5|G6|G7|RED) need_fi
 if [ "$need_fixtures" = 1 ]; then
   echo "== 準備 rig 與素材 =="
   bash "$HERE/rig/make_rig.sh" 2>&1 | tail -3
-  bash "$HERE/rig/fixtures.sh" fetch 2>&1 | tail -8
+  # 素材抓不到就整輪中止。不中止的話後面每一關都會在「沒有素材」的情況下空跑,
+  # 而空跑產出的是一整排看起來像真的的 FAIL(2026-09-09 實測:紅綠驗證台 16 個假紅)——
+  # 那比空跑報綠更糟,因為它會讓人以為警報系統壞了。
+  if ! bash "$HERE/rig/fixtures.sh" fetch 2>&1 | tail -8; then
+    echo "素材準備失敗 —— 整輪中止(不讓後面的關卡空跑)"; exit 3
+  fi
+  if [ ! -s "${LC_FIXTURES_DIR:-$LC_GATE_HOME/fixtures}/fixtures.tsv" ]; then
+    echo "素材清單是空的 —— 整輪中止(不讓後面的關卡空跑)"; exit 3
+  fi
 fi
 total_fail=0
 for t in $(echo "$TIERS" | tr ',' ' '); do

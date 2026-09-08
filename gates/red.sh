@@ -33,8 +33,12 @@ flags_of() {
 
 cp "$LC_REPO/target/LazyContainerAgent.jar" "$LC_RIG/" || exit 1
 # 只用一份素材:紅綠驗證要的是「訊號有沒有出現」,不是覆蓋率(覆蓋率是 G4 的事)。
+# 沒有素材就不要跑:空跑會把每一條斷言都判成紅,看起來像「警報壞了」,其實是「什麼都沒跑」。
+[ -s "$LC_FIXTURES_DIR/fixtures.tsv" ] || { fail "沒有素材($LC_FIXTURES_DIR/fixtures.tsv 是空的)—— 這一關不算數"; tier_verdict; exit 1; }
 FIX=$(head -1 "$LC_FIXTURES_DIR/fixtures.tsv")
 read -r label dim reg rx rz <<<"$FIX"
+[ -n "$reg" ] && [ -f "$LC_FIXTURES_DIR/$label/$reg.mca" ] \
+  || { fail "素材檔不在($LC_FIXTURES_DIR/$label/$reg.mca)—— 這一關不算數"; tier_verdict; exit 1; }
 echo "素材:$label $dim $reg"
 
 for r in $ROUNDS; do
@@ -60,7 +64,7 @@ for r in $ROUNDS; do
 done
 
 # ── 判定 ────────────────────────────────────────────────────────────────────────
-n() { grep -ac "$2" "$E/$1.log" 2>/dev/null || true; }
+n() { local v; v=$(grep -ac "$2" "$E/$1.log" 2>/dev/null || true); echo "${v:-0}"; }
 ctrv() { local v; v=$(ctr "$(cat "$E/$1.counters" 2>/dev/null)" "$2"); echo "${v:-0}"; }
 emptied() { grep -oE "歸零容器 [0-9]+ 個" "$E/$1.loss" 2>/dev/null | grep -oE "[0-9]+" | awk '{s+=$1} END{print s+0}'; }
 
