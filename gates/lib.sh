@@ -63,9 +63,11 @@ forceload_region() {
 # 變成「一邊比一邊被世界改」,而且完全看不出來。所以要偵測並且講出來。
 try_freeze() {
   local console="$1" before after
-  before=$(grep -ac "HERE" "$console" 2>/dev/null || echo 0)
+  # grep -c 零命中時「印 0 而且退出碼 1」⟹ 寫成 `|| echo 0` 會變成兩行 "0\n0",
+  # 之後的 [ ... -gt ... ] 直接爆 "integer expression expected"(實測踩過)。只能用 || true。
+  before=$(grep -ac "HERE" "$console" 2>/dev/null || true); before=${before:-0}
   rig_send "tick freeze" 2
-  after=$(grep -ac "HERE" "$console" 2>/dev/null || echo 0)
+  after=$(grep -ac "HERE" "$console" 2>/dev/null || true); after=${after:-0}
   if [ "${after:-0}" -gt "${before:-0}" ]; then
     LC_FROZEN=0
     warn "這個核心不支援 tick freeze(區域執行緒核心沒有全域 tick)——世界會邊比邊動,改用機械事件證據判定"
