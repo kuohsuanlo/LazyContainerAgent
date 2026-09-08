@@ -108,6 +108,7 @@ public final class LazyContainerAgentMain {
         System.out.println("[LazyContainer] agent installed (transformer registered, template="
                 + (ready ? "ready" : "MISSING") + ")"
                 + (LazyContainerRuntime.shadow() ? " [SHADOW mode]" : ""));
+        LazyContainerRuntime.announceFault();   // 帶了紅綠驗證台旗標就吵到不可能沒看見
     }
 
     /** agentmain(動態 attach)時:目標 NMS 類可能已載入,逐一 retransform。 */

@@ -181,6 +181,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                 LazyContainerRuntime.onEagerLoad();
                 return;
             }
+            encoded = LazyContainerRuntime.faultCorruptRaw(encoded);   // 紅綠驗證台:預設是恆等函式
             this.lazycontainer$raw = encoded;
             this.lazycontainer$loadedNonEmpty = encoded != null && !LazyContainerRuntime.rawListIsEmpty(encoded);
             // 摘要 eager 建置:樹此刻還在(免 parse);查詢端不再 lazy build(sumState==0 一律當「不知道」)
@@ -444,8 +445,33 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
     // 舊版在鎖外讀 pending 後再讀 raw,ensure 中途存檔會把「半填清單」編碼寫盤(autosave 對純讀不弄髒的 chunk
     // 之後不再重寫 ⟹ 磁碟永久殘缺)。存檔本來就不是每 tick 熱路徑,多一次無競爭 monitor 進出可忽略。
 
+    /**
+     * 紅綠驗證台專用:把一個「載入時有東西、沒人碰過」的容器,在沒有經過任何存取點的情況下清空。
+     * 這正是 2026-09-08 s3 事故在磁碟上留下的形狀(物化過、清單空、其餘 NBT 一字不差)。
+     * 預設 {@code -Dlazycontainer.fault} 是空的,這個方法直接返回。
+     */
+    private void lazycontainer$maybeInjectWipe(NonNullList<ItemStack> items) {
+        if (!this.lazycontainer$loadedNonEmpty || this.lazycontainer$accessed) {
+            return;
+        }
+        boolean materialize = LazyContainerRuntime.faultWipe();
+        boolean keepRaw = !materialize && LazyContainerRuntime.faultWipeKeepRaw();
+        if (!materialize && !keepRaw) {
+            return;
+        }
+        if (materialize) {
+            this.lazycontainer$ensure();                // 物化(吃掉 raw),模擬「已經被展開過」的容器
+        }
+        for (int i = 0; i < items.size(); i++) {
+            items.set(i, ItemStack.EMPTY);
+        }
+        System.err.println("[LazyContainer] FAULT " + (materialize ? "wipe" : "wipeKeepRaw") + ": "
+                + this.lazycontainer$posForLog() + " 的清單已被清空(沒有經過任何存取點)");
+    }
+
     /** 取代 {@code ContainerHelper.saveAllItems(output, items)}(allowEmpty=true:chest/barrel)。 */
     public synchronized void lazycontainer$save(ValueOutput output, NonNullList<ItemStack> items) {
+        this.lazycontainer$maybeInjectWipe(items);
         if (this.lazycontainer$trySaveRaw(output, true)) {
             return;
         }
@@ -457,6 +483,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
 
     /** 取代 {@code ContainerHelper.saveAllItems(output, items, false)}(allowEmpty=false:shulker)。 */
     public synchronized void lazycontainer$saveNoEmpty(ValueOutput output, NonNullList<ItemStack> items) {
+        this.lazycontainer$maybeInjectWipe(items);
         if (this.lazycontainer$trySaveRaw(output, false)) {
             return;
         }
@@ -489,6 +516,9 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
      * @return true = 已經處理完(呼叫端不要再寫);false = 正常情況,照舊寫
      */
     private boolean lazycontainer$guardEmptyWrite(ValueOutput output, NonNullList<ItemStack> items, boolean allowEmpty) {
+        if (!LazyContainerRuntime.guard()) {
+            return false;                                   // 對照組:關掉守門,看「沒有這一關會怎樣」
+        }
         if (!this.lazycontainer$loadedNonEmpty || this.lazycontainer$accessed) {
             return false;                                   // 沒東西可掉,或有人正當地動過它
         }

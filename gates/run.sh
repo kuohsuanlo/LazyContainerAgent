@@ -3,6 +3,7 @@
 #
 #   bash gates/run.sh                      跑全部(G0…G8)
 #   bash gates/run.sh --tiers G0,G1,G2,G3  只跑指定關卡
+#   bash gates/run.sh --tiers RED          紅綠驗證台:故意注入故障,證明警報真的會亮
 #   bash gates/run.sh --version 26.3       換版本設定檔(gates/versions/26.3.env)
 #   bash gates/run.sh --keep-fixtures      跑完保留素材副本(預設會刪:那是正式站的資料)
 #
@@ -50,11 +51,11 @@ echo "出貨 gate:MC $LC_MC_VERSION,產物 $LC_OUT"
   echo "|---|---|---|---|---|"
 } > "$REPORT"
 declare -A NAME=( [G0]="環境/版本" [G1]="建置+政策閘門" [G2]="注入形狀 diff" [G3]="差分/併發單元"
-                  [G4]="存檔四模式 E2E" [G5]="逐格裁判" [G6]="摘要/影子對抗" [G7]="互動對抗總判定" [G8]="出貨物件" )
+                  [G4]="存檔四模式 E2E" [G5]="逐格裁判" [G6]="摘要/影子對抗" [G7]="互動對抗總判定" [G8]="出貨物件" [RED]="紅綠驗證台(故意弄壞)" )
 declare -A SCRIPT=( [G0]=g0_preflight.sh [G1]=g1_build.sh [G2]=g2_shape.sh [G3]=g3_unit.sh
-                    [G4]=g4_e2e.sh [G5]=g5_judge.sh [G6]=g6_shadow.sh [G7]=g7_interactive.sh [G8]=g8_ship.sh )
+                    [G4]=g4_e2e.sh [G5]=g5_judge.sh [G6]=g6_shadow.sh [G7]=g7_interactive.sh [G8]=g8_ship.sh [RED]=red.sh )
 need_fixtures=0
-for t in $(echo "$TIERS" | tr ',' ' '); do case "$t" in G4|G5|G6|G7) need_fixtures=1;; esac; done
+for t in $(echo "$TIERS" | tr ',' ' '); do case "$t" in G4|G5|G6|G7|RED) need_fixtures=1;; esac; done
 if [ "$need_fixtures" = 1 ]; then
   echo "== 準備 rig 與素材 =="
   bash "$HERE/rig/make_rig.sh" 2>&1 | tail -3

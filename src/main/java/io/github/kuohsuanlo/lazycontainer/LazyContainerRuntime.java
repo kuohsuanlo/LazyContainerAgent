@@ -224,6 +224,71 @@ public final class LazyContainerRuntime {
 
     private static final boolean PASSTHROUGH = !"false".equalsIgnoreCase(System.getProperty("lazycontainer.passthrough"));
 
+    // ── 故障注入(只給紅綠驗證台;預設關閉)────────────────────────────────────────────
+    //
+    // 「沒有紅就不准判綠」:一個從來沒有真的亮過紅燈的警報系統,和沒有警報系統是一樣的。
+    // 這裡提供兩種可控故障,讓 gates/red.sh 在真實素材上把警報打紅:
+    //   -Dlazycontainer.fault=corruptRaw  每 N 個容器,把載入時收下的原始 bytes 改壞一個 byte
+    //                                     ⟹ 存檔時核心自己的 NbtIo 會解爆 ⟹ 應該亮 BAD RAW
+    //   -Dlazycontainer.fault=wipe        每 N 個容器,在沒有任何存取點碰過的情況下把清單清空
+    //                                     ⟹ 應該亮 SILENT WIPE(這正是 2026-09-08 s3 的磁碟指紋)
+    //   -Dlazycontainer.fault.every=N     多久來一次(預設 500)
+    //   -Dlazycontainer.guard=false       關掉存檔守門,用來做「沒有守門會怎樣」的對照組
+    //
+    // 三重保險確保不會被誤帶上正式站:預設空字串、啟用時開機印一整段大字、G0/G4 會 grep 這段字。
+    private static final String FAULT = System.getProperty("lazycontainer.fault", "");
+    private static final int FAULT_EVERY = Integer.getInteger("lazycontainer.fault.every", 500);
+    private static final java.util.concurrent.atomic.AtomicLong faultTick = new java.util.concurrent.atomic.AtomicLong();
+    /** 存檔守門的 kill switch(對照組用)。 */
+    private static final boolean GUARD = !"false".equalsIgnoreCase(System.getProperty("lazycontainer.guard"));
+
+    public static boolean guard() {
+        return GUARD;
+    }
+
+    public static boolean faultEnabled() {
+        return !FAULT.isEmpty();
+    }
+
+    /** 開機時印,越吵越好——這段字出現在正式站的 log 裡就是有人帶錯旗標。 */
+    public static void announceFault() {
+        if (FAULT.isEmpty() && GUARD) {
+            return;
+        }
+        System.err.println("[LazyContainer] ############ FAULT INJECTION ACTIVE ############");
+        System.err.println("[LazyContainer] # fault=" + (FAULT.isEmpty() ? "(無)" : FAULT)
+                + " every=" + FAULT_EVERY + " guard=" + GUARD);
+        System.err.println("[LazyContainer] # 這是紅綠驗證台專用的旗標,會故意弄壞玩家資料。");
+        System.err.println("[LazyContainer] # 正式站看到這一行 ⟹ 立刻停機拿掉 -Dlazycontainer.fault / -Dlazycontainer.guard。");
+        System.err.println("[LazyContainer] ################################################");
+    }
+
+    private static boolean faultHit(String mode) {
+        return FAULT.equals(mode) && (faultTick.incrementAndGet() % FAULT_EVERY) == 0L;
+    }
+
+    /** 把 raw 改壞一個 byte(挑中段,避開型別/長度表頭讓走訪器不一定擋得住)。 */
+    public static byte[] faultCorruptRaw(byte[] raw) {
+        if (raw == null || raw.length < 16 || !faultHit("corruptRaw")) {
+            return raw;
+        }
+        byte[] bad = raw.clone();
+        int at = bad.length / 2;
+        bad[at] = (byte) (bad[at] ^ 0x5A);
+        System.err.println("[LazyContainer] FAULT corruptRaw: 第 " + at + " 個 byte 已改壞(共 " + bad.length + " bytes)");
+        return bad;
+    }
+
+    /** 這一個容器要不要被「在沒人碰的情況下清空」(先物化,吃掉 raw ⟹ 守門救不回來,只能偵測)。 */
+    public static boolean faultWipe() {
+        return faultHit("wipe");
+    }
+
+    /** 同上,但**不物化**:pending 與 raw 都還在 ⟹ 存檔本來就會原樣寫回,根本不該掉東西。 */
+    public static boolean faultWipeKeepRaw() {
+        return faultHit("wipeKeepRaw");
+    }
+
     /**
      * 自動降級旗標。偵測到「內容在沒人碰的情況下消失」(靜默清空)或「自家 raw bytes 解不開」時就地翻起來,
      * 之後 {@link #passthrough()} 恆為 false ⟹ 每次存檔都走完整解析路徑(= 26.2-2 的行為,已在正式站跑過的那條)。
