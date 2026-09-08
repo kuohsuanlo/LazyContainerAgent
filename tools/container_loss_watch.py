@@ -187,7 +187,13 @@ def main():
 
     if out_json:
         with open(out_json, 'w') as f:
-            json.dump([{'chunk': k, **v} for _, k, v in hits], f, ensure_ascii=False, indent=1)
+            # 不用 {**v}:正式站的 python 舊到不支援字典字面量展開(實測 SyntaxError)
+            rows = []
+            for _loss, k, v in hits:
+                row = dict(v)
+                row['chunk'] = k
+                rows.append(row)
+            json.dump(rows, f, ensure_ascii=False, indent=1)
         print('\nJSON → %s' % out_json)
 
     return 1 if hits else 0
