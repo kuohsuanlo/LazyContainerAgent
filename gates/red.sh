@@ -9,12 +9,14 @@
 #   wipe             清單被清空,raw 已被物化吃掉 ⟹ 必須亮 SILENT WIPE + SAFE MODE
 #   wipe-noguard     同上但關掉守門(對照組)   ⟹ 必須「沒有警報」而且磁碟真的掉東西
 #   corruptRaw       raw 被改壞一個 byte       ⟹ 核心自己的 NbtIo 解爆,必須亮 BAD RAW + SAFE MODE
+#   dropSideCar      直寫的側車被吞掉           ⟹ rawEmit 追不上 rawPassthrough,必須亮 BAD PASSTHROUGH;
+#                                                 而且磁碟上的指紋必須是「缺 Items 鍵」而不是「空清單」
 #
 # 判準寫在最後的 verdict:紅回合亮紅 + 綠回合全綠 + 對照組真的掉東西,三者同時成立才算通過。
 LC_TIER=RED
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 E=$LC_OUT/red; mkdir -p "$E"
-ROUNDS="${LC_RED_ROUNDS:-green wipeKeepRaw wipe wipe-noguard corruptRaw}"
+ROUNDS="${LC_RED_ROUNDS:-green wipeKeepRaw wipe wipe-noguard corruptRaw dropSideCar}"
 EVERY="${LC_RED_EVERY:-50}"          # 每 N 個容器注入一次
 
 flags_of() {
@@ -25,6 +27,7 @@ flags_of() {
     wipe)         echo "$a -Dlazycontainer.fault=wipe -Dlazycontainer.fault.every=$EVERY" ;;
     wipe-noguard) echo "$a -Dlazycontainer.fault=wipe -Dlazycontainer.fault.every=$EVERY -Dlazycontainer.guard=false" ;;
     corruptRaw)   echo "$a -Dlazycontainer.fault=corruptRaw -Dlazycontainer.fault.every=$EVERY" ;;
+    dropSideCar)  echo "$a -Dlazycontainer.fault=dropSideCar -Dlazycontainer.fault.every=$EVERY" ;;
   esac
 }
 
@@ -101,6 +104,24 @@ case " $ROUNDS " in *" corruptRaw "*)
   fi
   [ "$(cat "$E/corruptRaw.dumps" 2>/dev/null || echo 0)" -gt 0 ] && ok "[corruptRaw] 壞 bytes 有落檔可救" || warn "[corruptRaw] 沒有 lc-badraw 落檔"
   [ "$(n corruptRaw 'SAFE MODE')" -gt 0 ] && ok "[corruptRaw] 自動降級 SAFE MODE 觸發" || fail "[corruptRaw] 沒有降級"
+;; esac
+
+case " $ROUNDS " in *" dropSideCar "*)
+  pt=$(ctrv dropSideCar rawPassthrough); em=$(ctrv dropSideCar rawEmit)
+  [ "${pt:-0}" -gt 0 ] && ok "[dropSideCar] 直寫真的有跑(rawPassthrough=$pt)" || fail "[dropSideCar] 直寫沒跑,這一回合不算數"
+  [ "${em:-0}" -lt "${pt:-1}" ] && ok "[dropSideCar] rawEmit=$em < rawPassthrough=$pt(側車真的被吞了)" || fail "[dropSideCar] 側車沒被吞,故障沒生效"
+  [ "$(n dropSideCar 'BAD PASSTHROUGH')" -gt 0 ] \
+    && ok "[dropSideCar] 亮紅:BAD PASSTHROUGH $(n dropSideCar 'BAD PASSTHROUGH') 行" \
+    || fail "[dropSideCar] 側車被吞卻沒有 BAD PASSTHROUGH —— #261 唯一不會自己爆的失效模式沒被抓到"
+  # 指紋:側車被吞 ⟹ 容器在磁碟上「完全沒有 Items 這個鍵」,而不是「空清單」。
+  # 這條是 2026-09-08 s3 事故判讀的依據,要用一次可控實驗釘住。
+  python3 "$LC_LIB_DIR/py/itemskey.py" "$E/dropSideCar/$reg.mca" > "$E/dropSideCar.keys" 2>&1 || true
+  python3 "$LC_LIB_DIR/py/itemskey.py" "$LC_FIXTURES_DIR/$label/$reg.mca" > "$E/input.keys" 2>&1 || true
+  nk=$(grep -oE "no_items_key +[0-9]+" "$E/dropSideCar.keys" | grep -oE "[0-9]+$")
+  ik=$(grep -oE "no_items_key +[0-9]+" "$E/input.keys" | grep -oE "[0-9]+$")
+  [ "${nk:-0}" -gt "${ik:-0}" ] \
+    && ok "[dropSideCar] 磁碟指紋 = 缺 Items 鍵(輸入 ${ik:-0} → 輸出 ${nk:-0}),與『空清單』是不同機制" \
+    || fail "[dropSideCar] 缺鍵數沒有增加(輸入 ${ik:-0} → 輸出 ${nk:-0})—— 指紋假設不成立"
 ;; esac
 
 tier_verdict

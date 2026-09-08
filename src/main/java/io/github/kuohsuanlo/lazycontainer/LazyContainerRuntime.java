@@ -263,8 +263,21 @@ public final class LazyContainerRuntime {
         System.err.println("[LazyContainer] ################################################");
     }
 
+    /** 預先算好,不要在存檔熱路徑上做字串比較。 */
+    private static final boolean FAULT_DROP_SIDECAR = "dropSideCar".equals(FAULT);
+
     private static boolean faultHit(String mode) {
         return FAULT.equals(mode) && (faultTick.incrementAndGet() % FAULT_EVERY) == 0L;
+    }
+
+    /**
+     * 模擬「核心把直寫的側車丟掉」:掛上去了、rawPassthrough 也加了,但序列化時什麼都沒寫出去。
+     * 這是 #261 唯一「不會自己爆」的失效模式,拿它來量兩件事:
+     *   (a) 它在磁碟上留下的指紋是「容器完全沒有 Items 這個鍵」(不是空清單);
+     *   (b) rawEmit 追不上 rawPassthrough 的對帳告警在真伺服器上真的會叫。
+     */
+    private static boolean faultDropSideCar() {
+        return FAULT_DROP_SIDECAR && (faultTick.incrementAndGet() % FAULT_EVERY) == 0L;
     }
 
     /** 把 raw 改壞一個 byte(挑中段,避開型別/長度表頭讓走訪器不一定擋得住)。 */
@@ -389,6 +402,9 @@ public final class LazyContainerRuntime {
     public static void writeRawEntry(String key, byte[] raw, java.io.DataOutput out) throws java.io.IOException {
         if (raw == null || raw.length == 0 || raw[0] == 0) {
             return;
+        }
+        if (FAULT_DROP_SIDECAR && faultDropSideCar()) {
+            return;                                     // 紅綠驗證台:假裝核心把側車吞了(rawEmit 不加)
         }
         out.writeByte(raw[0]);
         out.writeUTF(key);
