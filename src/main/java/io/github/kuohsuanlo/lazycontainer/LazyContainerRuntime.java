@@ -1069,7 +1069,11 @@ public final class LazyContainerRuntime {
     // 側車真的被丟掉時,低水位會被永久墊高。取最近 N 輪差額的最小值,連續整個視窗都高於門檻才告警。
     // 這個判準不需要「安靜的那一刻」,爆量存檔期間差額上上下下也不會誤觸。
     private static final int PT_DEFICIT_MIN = Integer.getInteger("lazycontainer.passthrough.deficitMin", 64);
-    private static final int PT_DEFICIT_WINDOW = Integer.getInteger("lazycontainer.passthrough.deficitWindow", 5);
+    // 視窗長度是「多久才敢說話」與「誤報機率」的取捨。取 3:統計行預設 30 秒一輪 ⟹ 90 秒沒有回補過
+    // 就開口。誤報的代價只是掉回 26.2-2 的存檔路徑(那條在正式站跑了好幾週),漏報的代價是資料靜默消失,
+    // 所以這裡刻意偏向早講。2026-09-09 紅綠驗證台實測:視窗 5 時 dropSideCar 回合只湊得到 4 個取樣點,
+    // 判準是對的但永遠等不到第 5 點——「等得太久」和「不會叫」在實務上沒有差別。
+    private static final int PT_DEFICIT_WINDOW = Integer.getInteger("lazycontainer.passthrough.deficitWindow", 3);
     private static final long[] ptDeficitRing = new long[Math.max(2, PT_DEFICIT_WINDOW)];
     private static int ptDeficitN;
     private static boolean ptDeficitReported;

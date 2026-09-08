@@ -52,7 +52,7 @@ for r in $ROUNDS; do
   try_freeze "$E/$r.console" || true
   forceload_region "$dim" "$rx" "$rz"
   wait_stash 1000 || warn "[$r] stash 沒有穩定下來"
-  rig_send "save-all flush" 2; sleep 40
+  rig_send "save-all flush" 2; sleep 90   # 留夠時間讓統計執行緒吐出足夠的取樣點給對帳判準
   stats_line > "$E/$r.counters"
   rig_send "forceload remove all" 2; rig_send "stop" 2; sleep 45; rig_kill
   cp "$LC_RIG/logs/latest.log" "$E/$r.log" 2>/dev/null
