@@ -28,7 +28,11 @@ for f in $(fixtures_each); do
     # request"(2026-09-09 實測踩到一次)。一次網路抖動不該把一小時的 gate 整輪弄掉。
     ok=0
     for try in 1 2 3; do
-      if scp -q "$LC_FLEET_HOST:$remote" "$dst"; then ok=1; break; fi
+      # 遠端大小先問一次,抓回來要對得上:半個檔案比抓不到更難查。
+      rsize=$(ssh -o ConnectTimeout=10 "$LC_FLEET_HOST" "stat -c %s '$remote'" 2>/dev/null || true)
+      if scp -q "$LC_FLEET_HOST:$remote" "$dst" \
+         && [ -s "$dst" ] \
+         && { [ -z "$rsize" ] || [ "$(stat -c %s "$dst")" = "$rsize" ]; }; then ok=1; break; fi
       echo "   第 $try 次取檔失敗,5 秒後重試"; rm -f "$dst"; sleep 5
     done
     [ "$ok" = 1 ] || { echo "取不到 $remote(重試三次都失敗)"; exit 1; }
