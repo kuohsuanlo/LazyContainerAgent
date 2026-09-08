@@ -1058,12 +1058,20 @@ public final class LazyContainerRuntime {
                         : " attribution=off");
     }
 
-    /** 直寫對帳:連續幾輪 deficit 不降就告警(避免把「IO 落後」誤報成側車遺失)。 */
-    private static final int PT_DEFICIT_MIN = Integer.getInteger("lazycontainer.passthrough.deficitMin", 4096);
-    private static final int PT_DEFICIT_STREAK = Integer.getInteger("lazycontainer.passthrough.deficitStreak", 3);
-    private static long ptLastDeficit = Long.MIN_VALUE;
-    private static long ptLastAttached = Long.MIN_VALUE;
-    private static int ptDeficitStreak;
+    // 直寫對帳的判準(2026-09-09 由紅綠驗證台的 dropSideCar 回合改寫)。
+    //
+    // 舊判準是「這一輪沒有再掛新的側車,且差額連續數輪不降,且差額 ≥ 4096」。紅測實跑證明它是死的:
+    // 故意吞掉 565 個側車,一行都沒印。兩個原因——(a) 4096 這個門檻比整起事故的規模還大
+    // (s3 那次總共才 169 個容器);(b)「這一輪沒有新側車掛上」在正式站幾乎不成立,自動存檔是連續的。
+    // 當初加那個靜止條件是為了消掉一個爆量存檔造成的假紅,結果把警報整個關掉了。
+    //
+    // 新判準:看**差額的低水位**。正常的 IO 落後會回補,所以差額會週期性地掉回接近 0;
+    // 側車真的被丟掉時,低水位會被永久墊高。取最近 N 輪差額的最小值,連續整個視窗都高於門檻才告警。
+    // 這個判準不需要「安靜的那一刻」,爆量存檔期間差額上上下下也不會誤觸。
+    private static final int PT_DEFICIT_MIN = Integer.getInteger("lazycontainer.passthrough.deficitMin", 64);
+    private static final int PT_DEFICIT_WINDOW = Integer.getInteger("lazycontainer.passthrough.deficitWindow", 5);
+    private static final long[] ptDeficitRing = new long[Math.max(2, PT_DEFICIT_WINDOW)];
+    private static int ptDeficitN;
     private static boolean ptDeficitReported;
 
     /**
@@ -1075,39 +1083,44 @@ public final class LazyContainerRuntime {
      * (換版最危險、且唯一不會自己爆的失效模式)。此時大聲印一行並提示關掉直寫。</p>
      */
     static void checkPassthroughDeficit() {
-        if (!PASSTHROUGH || PASSTHROUGH_SHADOW) {
+        if (!PASSTHROUGH || PASSTHROUGH_SHADOW || SAFE_MODE) {
             return;
         }
         long attached = rawPassthrough.sum();
         long emitted = rawEmit.sum();
         long deficit = attached - emitted;
-        // 只在「這一輪沒有再掛新的側車」時才判定。存檔是一陣一陣的:收集在 region 執行緒、
-        // 寫出在 IO 執行緒,爆量存檔當下落後量本來就會連著幾輪往上長——那是正常的,不是側車不見了。
-        // 真正的失效長相是「已經沒有新的掛上去了,寫出的數字卻還是追不上」。
-        boolean busy = attached != ptLastAttached;
-        ptLastAttached = attached;
-        if (!busy && deficit >= PT_DEFICIT_MIN && deficit <= ptLastDeficit) {
-            ptDeficitStreak++;
-        } else {
-            ptDeficitStreak = 0;
-            ptDeficitReported = false;
+        ptDeficitRing[ptDeficitN % ptDeficitRing.length] = deficit;
+        ptDeficitN++;
+        if (ptDeficitN < ptDeficitRing.length) {
+            return;                                     // 視窗還沒填滿,不夠判
         }
-        ptLastDeficit = deficit;
-        if (ptDeficitStreak >= PT_DEFICIT_STREAK && !ptDeficitReported) {
-            ptDeficitReported = true;
-            System.err.println("[LazyContainer] BAD PASSTHROUGH: 掛上側車 " + attached + " 次,實際寫出只有 "
-                    + emitted + " 次(差 " + deficit + ",連續 " + ptDeficitStreak + " 輪沒回補)。"
-                    + "核心的存檔鏈可能在中途重建了 CompoundTag,直寫的 Items 會被丟掉 ⟹ "
-                    + "請立刻加上 -Dlazycontainer.passthrough=false 重啟,並回報此行。");
+        long low = Long.MAX_VALUE;
+        for (long d : ptDeficitRing) {
+            if (d < low) {
+                low = d;
+            }
         }
+        if (low < PT_DEFICIT_MIN) {
+            ptDeficitReported = false;                  // 差額回補過 ⟹ 只是 IO 落後
+            return;
+        }
+        if (ptDeficitReported) {
+            return;
+        }
+        ptDeficitReported = true;
+        System.err.println("[LazyContainer] BAD PASSTHROUGH: 掛上側車 " + attached + " 次,實際寫出只有 "
+                + emitted + " 次(差 " + deficit + ";最近 " + ptDeficitRing.length
+                + " 輪的差額最低點是 " + low + ",從來沒有回補過)。"
+                + "核心的存檔鏈可能在中途重建了 CompoundTag,直寫的 Items 會被丟掉 ⟹ 容器會存成空的。");
+        tripSafeMode("直寫側車對帳連續 " + ptDeficitRing.length + " 輪追不上(差 " + low + " 以上)");
     }
 
     /** 只給測試用:把對帳狀態機歸零(生產路徑不呼叫)。 */
     static void resetPassthroughDeficitStateForTest() {
-        ptLastDeficit = Long.MAX_VALUE;
-        ptLastAttached = Long.MIN_VALUE;
-        ptDeficitStreak = 0;
+        java.util.Arrays.fill(ptDeficitRing, 0L);
+        ptDeficitN = 0;
         ptDeficitReported = false;
+        resetSafeModeForTests();
     }
 
     /**
