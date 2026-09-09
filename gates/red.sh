@@ -28,7 +28,7 @@ flags_of() {
     wipeKeepRaw)  echo "$a -Dlazycontainer.fault=wipeKeepRaw -Dlazycontainer.fault.every=$EVERY" ;;
     wipe)         echo "$a -Dlazycontainer.fault=wipe -Dlazycontainer.fault.every=$EVERY" ;;
     wipe-noguard) echo "$a -Dlazycontainer.fault=wipe -Dlazycontainer.fault.every=$EVERY -Dlazycontainer.guard=false" ;;
-    wipeAccessed) echo "$a -Dlazycontainer.fault=wipeAccessed -Dlazycontainer.fault.every=$EVERY" ;;
+    wipeAccessed) echo "$a -Dlazycontainer.fault=wipeAccessed -Dlazycontainer.fault.every=${LC_RED_EVERY_CHUNK:-10}" ;;   # 按 chunk 打:每 10 個 chunk 選一個全清
     corruptRaw)   echo "$a -Dlazycontainer.fault=corruptRaw -Dlazycontainer.fault.every=$EVERY" ;;
     dropSideCar)  echo "$a -Dlazycontainer.fault=dropSideCar -Dlazycontainer.fault.every=$EVERY" ;;
   esac
@@ -119,9 +119,11 @@ for f in glob.glob(os.path.join(sys.argv[1], '*.nbt')):
 print(n)
 PY2
 )
-  [ "${saved:-0}" -ge "$(emptied wipeAccessed)" ] && [ "${saved:-0}" -gt 0 ] \
-    && ok "[wipeAccessed] 救援檔裡 $saved 個容器 ≥ 磁碟掉的 $(emptied wipeAccessed) 個 —— 一個都不少" \
-    || fail "[wipeAccessed] 救援檔裡只有 ${saved:-0} 個,磁碟掉了 $(emptied wipeAccessed) 個"
+  # 磁碟上「達門檻的 chunk」共掉了幾個(門檻以下的 chunk 本來就不落檔——那是玩家搬家的份量)
+  expect=$(awk -v m="${LC_MASS_EMPTY_MIN:-8}" '/歸零容器 [0-9]+ 個/ { if (match($0, /歸零容器 [0-9]+/)) { n=substr($0, RSTART+5, RLENGTH-5)+0; if (n>=m) s+=n } } END { print s+0 }' "$E/wipeAccessed.loss")
+  [ "${saved:-0}" -ge "${expect:-1}" ] && [ "${saved:-0}" -gt 0 ] \
+    && ok "[wipeAccessed] 救援檔裡 $saved 個容器 ≥ 達門檻 chunk 磁碟掉的 $expect 個 —— 一個都不少(全部 $(emptied wipeAccessed) 個中,門檻以下的不落檔)" \
+    || fail "[wipeAccessed] 救援檔裡只有 ${saved:-0} 個,達門檻的 chunk 磁碟掉了 ${expect:-?} 個"
   [ "$(n wipeAccessed 'SAFE MODE')" -gt 0 ] && ok "[wipeAccessed] 自動降級 SAFE MODE 觸發" || fail "[wipeAccessed] 沒有降級"
 ;; esac
 case " $ROUNDS " in *" wipe-noguard "*)

@@ -520,7 +520,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         }
         boolean materialize = LazyContainerRuntime.faultWipe();
         boolean keepRaw = !materialize && LazyContainerRuntime.faultWipeKeepRaw();
-        boolean accessed = !materialize && !keepRaw && LazyContainerRuntime.faultWipeAccessed();
+        boolean accessed = !materialize && !keepRaw && LazyContainerRuntime.faultWipeAccessed(this.lazycontainer$chunkKeyForLog());
         if (!materialize && !keepRaw && !accessed) {
             return;
         }

@@ -302,9 +302,15 @@ public final class LazyContainerRuntime {
         return faultHit("wipeKeepRaw");
     }
 
-    /** 物化 + 標記「有人碰過」再清空:s3 事故的形狀。守門不得自動寫回,要走 chunk 級彙總落檔。 */
-    public static boolean faultWipeAccessed() {
-        return faultHit("wipeAccessed");
+    /**
+     * 物化 + 標記「有人碰過」再清空:s3 事故的形狀。守門不得自動寫回,要走 chunk 級彙總落檔。
+     * <p>按 <b>chunk</b> 選,不按容器數:每 N 個 chunk 選一個,把裡面全部清空。按容器數打會散在幾百個 chunk 上,
+     * 每個只中一兩個,永遠到不了「同一個 chunk 大面積」的門檻(2026-09-09 第一次紅測就是這樣沒亮)。
+     * s3 那次是一個 chunk 154 個。</p>
+     */
+    public static boolean faultWipeAccessed(String chunkKey) {
+        return "wipeAccessed".equals(FAULT) && chunkKey != null
+                && (chunkKey.hashCode() & 0x7fffffff) % FAULT_EVERY == 0;
     }
 
     /**
