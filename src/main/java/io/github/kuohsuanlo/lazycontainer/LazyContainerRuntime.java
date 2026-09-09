@@ -302,6 +302,11 @@ public final class LazyContainerRuntime {
         return faultHit("wipeKeepRaw");
     }
 
+    /** 物化 + 標記「有人碰過」再清空:s3 事故的形狀。守門不得自動寫回,要走 chunk 級彙總落檔。 */
+    public static boolean faultWipeAccessed() {
+        return faultHit("wipeAccessed");
+    }
+
     /**
      * 自動降級旗標。偵測到「內容在沒人碰的情況下消失」(靜默清空)或「自家 raw bytes 解不開」時就地翻起來,
      * 之後 {@link #passthrough()} 恆為 false ⟹ 每次存檔都走完整解析路徑(= 26.2-2 的行為,已在正式站跑過的那條)。
@@ -329,6 +334,180 @@ public final class LazyContainerRuntime {
                     + ";已就地關閉存檔直寫(passthrough),之後每一次存檔都走完整解析路徑。"
                     + "伺服器不需要重啟即已生效;重啟後會恢復直寫,所以請把這一行回報上來。");
         }
+    }
+
+    // ── 物化後留著的 raw:登記 + 到期釋放 ─────────────────────────────────────────
+    //
+    // 容器物化後 raw 不再立刻作廢(26.2-7),留到第一次存檔/卸載/到期。前兩者在容器自己身上發生;
+    // 「到期」由這裡兜底:統計執行緒每輪掃一次登記名單,超過上限的持容器 monitor 釋放。
+    // 名單用 WeakReference:chunk 卸載後容器被 GC,名單裡的項目自然變 null、下一輪掃掉,不會有孤兒。
+    // 成本:每次物化配置一個 WeakReference(物化本來就是慢路徑),掃描量 = 最近 keep 視窗內的物化數。
+
+    public static final long KEEP_RAW_MS = Long.getLong("lazycontainer.keepRaw.ms", 10L * 60L * 1000L);
+    private static final java.util.concurrent.ConcurrentLinkedQueue<java.lang.ref.WeakReference<Object>> KEPT =
+            new java.util.concurrent.ConcurrentLinkedQueue<java.lang.ref.WeakReference<Object>>();
+    private static volatile java.lang.reflect.Method RELEASE_IF_EXPIRED;
+    /** 目前登記中(還在留 raw)的容器數(統計行用)。 */
+    public static final java.util.concurrent.atomic.AtomicInteger keptRaw = new java.util.concurrent.atomic.AtomicInteger();
+
+    /** template 在成功物化後呼叫。 */
+    public static void trackKept(Object be) {
+        if (be == null) {
+            return;
+        }
+        KEPT.add(new java.lang.ref.WeakReference<Object>(be));
+        keptRaw.incrementAndGet();
+    }
+
+    /** 統計執行緒每輪呼叫:到期的釋放、已被 GC 的移除。 */
+    static void sweepKept() {
+        long now = System.nanoTime();
+        long keepNanos = KEEP_RAW_MS * 1_000_000L;
+        java.util.Iterator<java.lang.ref.WeakReference<Object>> it = KEPT.iterator();
+        while (it.hasNext()) {
+            java.lang.ref.WeakReference<Object> ref = it.next();
+            Object be = ref.get();
+            boolean drop = true;
+            if (be != null) {
+                try {
+                    java.lang.reflect.Method m = RELEASE_IF_EXPIRED;
+                    if (m == null) {
+                        m = be.getClass().getMethod("lazycontainer$releaseIfExpired", long.class, long.class);
+                        RELEASE_IF_EXPIRED = m;
+                    }
+                    drop = Boolean.TRUE.equals(m.invoke(be, now, keepNanos));
+                } catch (Throwable t) {
+                    drop = true;                        // 反射失敗就當作已釋放:名單不能因為一個壞項目而長不停
+                }
+            }
+            if (drop) {
+                it.remove();
+                keptRaw.decrementAndGet();
+            }
+        }
+    }
+
+    // ── chunk 級彙總:「有人碰過之後才變空」──────────────────────────────────────────
+    //
+    // 單一容器分不出「玩家拿光」和「程式清空」,所以不自動寫回(寫回 = 把玩家已拿走的東西再變一份)。
+    // 但同一次存檔裡**整個 chunk 大面積歸零**是玩法幾乎做不到的形狀(2026-09-08 s3:一個 chunk 154 個)。
+    // 這裡按「執行緒 + chunk」彙總:chunk 存檔在一條執行緒上連續處理同一個 chunk 的容器,
+    // 換 chunk 或閒置超過 2 秒就結算。達門檻 ⟹ 全部原始 bytes 落成一個可還原的 NBT 檔 + 報警 + 降級。
+
+    public static final int MASS_EMPTY_MIN = Integer.getInteger("lazycontainer.massEmpty.min", 8);
+    public static final java.util.concurrent.atomic.LongAdder massEmpty = new java.util.concurrent.atomic.LongAdder();
+    public static final java.util.concurrent.atomic.LongAdder massEmptyContainers = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.AtomicInteger massEmptyDumpN = new java.util.concurrent.atomic.AtomicInteger();
+
+    private static final class MassEmpty {
+        String chunkKey;
+        long lastSeen;
+        final java.util.ArrayList<int[]> pos = new java.util.ArrayList<int[]>();
+        final java.util.ArrayList<byte[]> raw = new java.util.ArrayList<byte[]>();
+    }
+
+    private static final java.util.concurrent.ConcurrentHashMap<Thread, MassEmpty> MASS =
+            new java.util.concurrent.ConcurrentHashMap<Thread, MassEmpty>();
+
+    /** template 在存檔路徑上呼叫(持容器 monitor):這個容器載入時有東西、有人碰過、現在要寫空的。 */
+    public static void onEmptiedAfterAccess(String chunkKey, int x, int y, int z, byte[] raw) {
+        if (raw == null) {
+            return;
+        }
+        Thread t = Thread.currentThread();
+        MassEmpty me = MASS.get(t);
+        if (me == null) {
+            me = new MassEmpty();
+            MASS.put(t, me);
+        }
+        synchronized (me) {
+            long now = System.nanoTime();
+            if (me.chunkKey != null && (!me.chunkKey.equals(chunkKey) || now - me.lastSeen > 2_000_000_000L)) {
+                finishMassEmpty(me);
+            }
+            me.chunkKey = chunkKey;
+            me.lastSeen = now;
+            me.pos.add(new int[] {x, y, z});
+            me.raw.add(raw);
+        }
+    }
+
+    /** 統計執行緒每輪呼叫:閒置超過 2 秒的批次結算(最後一個 chunk 不會有「下一個 chunk」來觸發)。 */
+    static void sweepMassEmpty() {
+        long now = System.nanoTime();
+        for (MassEmpty me : MASS.values()) {
+            synchronized (me) {
+                if (me.chunkKey != null && now - me.lastSeen > 2_000_000_000L) {
+                    finishMassEmpty(me);
+                }
+            }
+        }
+    }
+
+    /** 呼叫端持 me 的 monitor。 */
+    private static void finishMassEmpty(MassEmpty me) {
+        int n = me.pos.size();
+        String key = me.chunkKey;
+        if (n >= MASS_EMPTY_MIN) {
+            massEmpty.increment();
+            massEmptyContainers.add(n);
+            java.io.File f = dumpMassEmpty(key, me.pos, me.raw);
+            System.err.println("[LazyContainer] MASS EMPTY " + key + " —— 同一次存檔裡 " + n
+                    + " 個容器「載入時有東西、有人碰過、現在寫成空的」。單一容器分不出玩家拿光還是程式清空,"
+                    + "所以沒有自動寫回;全部原始內容已落檔:" + (f == null ? "(落檔失敗)" : f.getAbsolutePath())
+                    + " 。請立刻回報並保留這一行。");
+            tripSafeMode(key + " 大面積歸零(" + n + " 個容器)");
+        }
+        me.chunkKey = null;
+        me.pos.clear();
+        me.raw.clear();
+    }
+
+    /**
+     * 落成一個未壓縮的 NBT 檔(跟 level.dat 一樣的框架,只是沒 gzip):
+     * <pre>{ entries: [ { x, y, z, Items: &lt;原始 ListTag&gt; }, ... ] }</pre>
+     * raw 本身就是 writeAnyTag 框架(1 byte 型別 + payload),直接當一個具名 tag 寫進去,零解析。
+     * 面板/工具用任何 NBT 讀取器都能開;還原就是把 entries 逐個塞回對應座標的 block entity。
+     */
+    private static java.io.File dumpMassEmpty(String key, java.util.List<int[]> pos, java.util.List<byte[]> raws) {
+        if (massEmptyDumpN.incrementAndGet() > 200) {
+            return null;                                // 落檔上限:防止異常狀態下把磁碟塞滿
+        }
+        try {
+            String safe = key.replaceAll("[^0-9A-Za-z_-]+", "_");
+            java.io.File f = new java.io.File(System.getProperty("lazycontainer.dump.dir", "."),
+                    "lc-massempty-" + safe + "-" + System.currentTimeMillis() + ".nbt");
+            java.io.DataOutputStream out = new java.io.DataOutputStream(
+                    new java.io.BufferedOutputStream(new java.io.FileOutputStream(f)));
+            try {
+                out.writeByte(10); out.writeUTF("");                    // root compound
+                out.writeByte(9); out.writeUTF("entries");              // list<compound>
+                out.writeByte(10); out.writeInt(pos.size());
+                for (int i = 0; i < pos.size(); i++) {
+                    int[] p = pos.get(i);
+                    byte[] raw = raws.get(i);
+                    out.writeByte(3); out.writeUTF("x"); out.writeInt(p[0]);
+                    out.writeByte(3); out.writeUTF("y"); out.writeInt(p[1]);
+                    out.writeByte(3); out.writeUTF("z"); out.writeInt(p[2]);
+                    if (raw != null && raw.length > 0 && raw[0] != 0) {
+                        out.writeByte(raw[0]); out.writeUTF("Items"); out.write(raw, 1, raw.length - 1);
+                    }
+                    out.writeByte(0);                                   // end entry
+                }
+                out.writeByte(0);                                       // end root
+            } finally {
+                out.close();
+            }
+            return f;
+        } catch (Throwable t) {
+            System.err.println("[LazyContainer] MASS EMPTY 落檔失敗:" + t);
+            return null;
+        }
+    }
+
+    /** 只給測試用:清掉「碰過之後歸零」的彙總狀態(各測試共用同一條執行緒與同一個 chunk key)。 */
+    static void resetMassEmptyForTests() {
+        MASS.clear();
     }
 
     /** 只給測試用:把自動降級歸零。正式執行期沒有任何呼叫點。 */
@@ -1022,6 +1201,8 @@ public final class LazyContainerRuntime {
                 + " rawWalkMaxMs=" + (rawWalkMaxNanos.get() / 1_000_000L)
                 + " badRaw=" + badRaw.sum()
                 + " silentWipe=" + silentWipe.sum() + "/" + silentWipeHealed.sum()
+                + " massEmpty=" + massEmpty.sum() + "/" + massEmptyContainers.sum()
+                + " keptRaw=" + keptRaw.get()
                 + (SAFE_MODE ? " SAFEMODE" : "")
                 + (PASSTHROUGH_SHADOW
                         ? " ptShadowOk=" + ptShadowOk.sum() + " ptShadowMismatch=" + ptShadowMismatch.sum()
@@ -1147,6 +1328,12 @@ public final class LazyContainerRuntime {
                 System.out.println("[LazyContainer] " + stats()
                         + (shadow() ? " (SHADOW)" : "") + " active=" + injected);
                 checkPassthroughDeficit();
+                try {
+                    sweepKept();                        // 物化後留著的 raw:到期釋放、已 GC 的移除
+                    sweepMassEmpty();                   // 閒置超過 2 秒的「碰過之後歸零」批次結算
+                } catch (Throwable ignored) {
+                    // 觀測/兜底失敗不得弄死統計執行緒
+                }
             }
         }, "LazyContainer-stats");
         t.setDaemon(true);

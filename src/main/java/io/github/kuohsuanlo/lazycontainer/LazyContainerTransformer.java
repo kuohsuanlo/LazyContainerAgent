@@ -353,7 +353,7 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
     }
 
     /**
-     * 方法入口插:ENSURE = {@code if(pending) ensureAccessed();};CLEAR = {@code lazycontainer$clear();}(26.2-2:進 monitor)。
+     * 方法入口插:ENSURE = {@code if(!accessed && ensuring!=currentThread) accessed=true; if(pending) ensure();};CLEAR = {@code lazycontainer$clear();}(26.2-2:進 monitor)。
      * CLEAR 用於 setItems(換清單)與 loadAdditional/loadFromTag(重新載入)——兩者都會讓既有的 lazy 狀態失效。
      */
     private static final class GuardMethodVisitor extends MethodVisitor {
@@ -370,12 +370,31 @@ public final class LazyContainerTransformer implements ClassFileTransformer {
         public void visitCode() {
             super.visitCode();
             if (kind == GUARD_ENSURE) {
+                // ① 無條件標記「被外部存取過」:if (!accessed && ensuring != Thread.currentThread()) accessed = true;
+                //    accessed 是 volatile:讀在 x86 上是普通 load;寫每個容器每次載入至多一次(之後第一個 GETFIELD 就短路)。
+                //    ensuring 的比較排除 ensure() 自己在 monitor 內呼叫 this.getItems() 的重入——那不算外部存取,
+                //    否則每個物化過的容器都會永久豁免存檔守門。值為 T 的寫入只可能出自 T 自己,鎖外讀是安全的。
+                //    26.2-7 之前只在「pending 時的第一次」標記,物化後再被碰就漏標 ⟹ 留著的 raw 有機會被誤寫回(複製)。
+                Label marked = new Label();
+                super.visitVarInsn(Opcodes.ALOAD, 0);
+                super.visitFieldInsn(Opcodes.GETFIELD, owner, "lazycontainer$accessed", "Z");
+                super.visitJumpInsn(Opcodes.IFNE, marked);
+                super.visitVarInsn(Opcodes.ALOAD, 0);
+                super.visitFieldInsn(Opcodes.GETFIELD, owner, "lazycontainer$ensuring", "Ljava/lang/Thread;");
+                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Thread", "currentThread", "()Ljava/lang/Thread;", false);
+                super.visitJumpInsn(Opcodes.IF_ACMPEQ, marked);
+                super.visitVarInsn(Opcodes.ALOAD, 0);
+                super.visitInsn(Opcodes.ICONST_1);
+                super.visitFieldInsn(Opcodes.PUTFIELD, owner, "lazycontainer$accessed", "Z");
+                super.visitLabel(marked);
+                super.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
+                // ② if (pending) ensure();
                 Label skip = new Label();
                 super.visitVarInsn(Opcodes.ALOAD, 0);
                 super.visitFieldInsn(Opcodes.GETFIELD, owner, "lazycontainer$pending", "Z");
                 super.visitJumpInsn(Opcodes.IFEQ, skip);
                 super.visitVarInsn(Opcodes.ALOAD, 0);
-                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, owner, "lazycontainer$ensureAccessed", "()V", false);
+                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, owner, "lazycontainer$ensure", "()V", false);
                 super.visitLabel(skip);
                 super.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
             } else { // GUARD_CLEAR

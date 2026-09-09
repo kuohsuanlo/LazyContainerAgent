@@ -72,7 +72,7 @@ public class LockPolicyCheck {
         ClassNode base = out.get(BASE);
         long fld = base.fields.stream().filter(f -> f.name.startsWith("lazycontainer$")).count();
         long mth = base.methods.stream().filter(m -> m.name.startsWith("lazycontainer$")).count();
-        if (fld == 9 && mth >= 12) ok("base splice: " + fld + " fields + " + mth + " methods");
+        if (fld == 10 && mth >= 12) ok("base splice: " + fld + " fields + " + mth + " methods");
         else fail("base splice 數量異常: " + fld + " fields / " + mth + " methods");
 
         // 呼叫閉包:private 的未同步方法,只要「所有呼叫端都持鎖」即合規(trySaveRaw 就是這型)
@@ -130,6 +130,13 @@ public class LockPolicyCheck {
                     String got = firstGuardCall(m);
                     if (want.equals(got)) ok(short_(leaf)+"."+m.name+" 入口 guard = "+want);
                     else fail(short_(leaf)+"."+m.name+" 入口 guard 應為 "+want+",實得 "+got);
+                    if (want.equals("lazycontainer$ensure")) {
+                        boolean marks = false;
+                        for (AbstractInsnNode in : m.instructions)
+                            if (in instanceof FieldInsnNode f && f.getOpcode()==Opcodes.PUTFIELD && f.name.equals(ACCESSED)) marks = true;
+                        if (marks) ok(short_(leaf)+"."+m.name+" 入口有無條件標記 accessed(留著的 raw 才不會被誤寫回)");
+                        else fail(short_(leaf)+"."+m.name+" 入口沒有標記 accessed —— 物化後再被碰會漏標,留著的 raw 可能被誤寫回(複製)");
+                    }
                 }
                 for (AbstractInsnNode in : m.instructions) {
                     if (in instanceof MethodInsnNode mi && mi.owner.equals("net/minecraft/world/ContainerHelper")
@@ -194,8 +201,8 @@ public class LockPolicyCheck {
         for (AbstractInsnNode in : m.instructions) if (in.getOpcode()==Opcodes.MONITORENTER) return true;
         return false; }
     static String expectGuard(String name,String desc){
-        if (name.equals("getItems") && desc.equals("()Lnet/minecraft/core/NonNullList;")) return "lazycontainer$ensureAccessed";
-        if (name.equals("getContents") && desc.equals("()Ljava/util/List;")) return "lazycontainer$ensureAccessed";
+        if (name.equals("getItems") && desc.equals("()Lnet/minecraft/core/NonNullList;")) return "lazycontainer$ensure";
+        if (name.equals("getContents") && desc.equals("()Ljava/util/List;")) return "lazycontainer$ensure";
         if (name.equals("setItems") && desc.equals("(Lnet/minecraft/core/NonNullList;)V")) return "lazycontainer$clear";
         if ((name.equals("loadAdditional")||name.equals("loadFromTag"))
                 && desc.equals("(Lnet/minecraft/world/level/storage/ValueInput;)V")) return "lazycontainer$clear";
@@ -205,7 +212,7 @@ public class LockPolicyCheck {
         int i = 0;
         for (AbstractInsnNode in : m.instructions) {
             if (in.getOpcode() < 0) continue;             // label/line/frame
-            if (++i > 8) break;
+            if (++i > 20) break;                          // 26.2-7:guard 前面多了 accessed 標記的 10 條指令
             if (in instanceof MethodInsnNode mi && mi.name.startsWith("lazycontainer$")) return mi.name;
         }
         return null; }

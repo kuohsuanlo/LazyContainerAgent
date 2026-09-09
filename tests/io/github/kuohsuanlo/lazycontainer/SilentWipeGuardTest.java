@@ -64,6 +64,13 @@ class SilentWipeGuardTest {
     @AfterEach
     void resetSafeMode() {
         LazyContainerRuntime.resetSafeModeForTests();
+        LazyContainerRuntime.resetMassEmptyForTests();
+    }
+
+    /** 各測試共用同一條執行緒與同一個 chunk key,前一個測試留下的彙總項目會污染門檻計數。 */
+    @org.junit.jupiter.api.BeforeEach
+    void resetMassEmpty() {
+        LazyContainerRuntime.resetMassEmptyForTests();
     }
 
     @Test
@@ -148,11 +155,13 @@ class SilentWipeGuardTest {
     }
 
     @Test
-    @DisplayName("原始 bytes 已被物化吃掉 → 救不回來,但絕不寫出空清單")
-    void wipedAfterMaterialization() {
+    @DisplayName("物化過、沒人碰過 → raw 還留著,當場寫回去")
+    void wipedAfterMaterializationIsHealed() {
         EnsureRaceTest.TestChest be = loaded(items(5));
         be.lazycontainer$ensure();                  // 存檔路徑自己的 fallback:物化但不算「被存取」
-        assertTrue(be.rawItems().get(0).isEmpty() == false, "物化後應該有東西");
+        assertTrue(!be.rawItems().get(0).isEmpty(), "物化後應該有東西");
+        assertNotNull(be.lazycontainer$raw, "26.2-7:物化後 raw 要留著");
+        assertTrue(be.lazycontainer$keptSince != 0L, "留著的 raw 要有起算時間");
         wipeListBehindTheAgentsBack(be);
 
         long w0 = wipes();
@@ -160,8 +169,126 @@ class SilentWipeGuardTest {
         Tag saved = save(be);
 
         assertEquals(1, wipes() - w0, "應該記一次靜默清空");
-        assertEquals(0, healed() - h0, "raw 已不在,不能宣稱自救");
-        assertNull(saved, "救不回來時寧可不寫 Items,也不主動寫出空的");
+        assertEquals(1, healed() - h0, "raw 留著 ⟹ 必須救回來");
+        assertNotNull(saved, "自救後 Items 必須存在");
+        assertEquals(5, ((ListTag) saved).size(), "五格原封不動寫回去");
+        assertNull(be.lazycontainer$raw, "物化後的第一次存檔 = 釋放點,存完 raw 要放掉");
+        assertEquals(0L, be.lazycontainer$keptSince);
+    }
+
+    @Test
+    @DisplayName("留著的 raw:存檔正常就釋放(沒報錯就釋放)")
+    void keptRawReleasedAfterCleanSave() {
+        EnsureRaceTest.TestChest be = loaded(items(5));
+        be.lazycontainer$ensure();
+        assertNotNull(be.lazycontainer$raw);
+        long w0 = wipes();
+        Tag saved = save(be);
+        assertEquals(0, wipes() - w0, "正常存檔不得報警");
+        assertEquals(5, ((ListTag) saved).size());
+        assertNull(be.lazycontainer$raw, "存檔正常 ⟹ 留著的 raw 釋放");
+    }
+
+    @Test
+    @DisplayName("留著的 raw:超過上限就釋放(到期兜底)")
+    void keptRawExpires() {
+        EnsureRaceTest.TestChest be = loaded(items(5));
+        be.lazycontainer$ensure();
+        long now = System.nanoTime();
+        assertTrue(!be.lazycontainer$releaseIfExpired(now, 60_000_000_000L), "還沒到期不得釋放");
+        assertNotNull(be.lazycontainer$raw);
+        assertTrue(be.lazycontainer$releaseIfExpired(now + 120_000_000_000L, 60_000_000_000L), "到期要釋放並回報可移除");
+        assertNull(be.lazycontainer$raw);
+    }
+
+    @Test
+    @DisplayName("有人碰過之後才變空 → 不寫回(那可能是玩家拿光的;寫回 = 複製)")
+    void emptiedAfterAccessIsNeverHealed() {
+        EnsureRaceTest.TestChest be = loaded(items(5));
+        NonNullList<ItemStack> list = be.getItems();    // = leaf guard:標記 accessed 並物化,raw 留著
+        assertTrue(be.lazycontainer$accessed);
+        assertNotNull(be.lazycontainer$raw, "物化後 raw 留著");
+        for (int i = 0; i < list.size(); i++) {
+            list.set(i, ItemStack.EMPTY);
+        }
+        long w0 = wipes();
+        long h0 = healed();
+        Tag saved = save(be);
+        assertEquals(0, wipes() - w0, "碰過的容器變空不是靜默清空");
+        assertEquals(0, healed() - h0, "絕不寫回");
+        assertNotNull(saved);
+        assertEquals(0, ((ListTag) saved).size(), "照常寫出空清單");
+    }
+
+    @Test
+    @DisplayName("整個 chunk 大面積「碰過之後歸零」→ 落檔 + 報警 + 降級(不寫回)")
+    void massEmptyDumpsAndAlarms() throws Exception {
+        java.io.File dir = java.nio.file.Files.createTempDirectory("lc-massempty").toFile();
+        String old = System.getProperty("lazycontainer.dump.dir");
+        System.setProperty("lazycontainer.dump.dir", dir.getAbsolutePath());
+        try {
+            long m0 = LazyContainerRuntime.massEmpty.sum();
+            java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+            java.io.PrintStream oldErr = System.err;
+            System.setErr(new java.io.PrintStream(bo));
+            try {
+                for (int n = 0; n < LazyContainerRuntime.MASS_EMPTY_MIN; n++) {
+                    EnsureRaceTest.TestChest be = loaded(items(3));
+                    NonNullList<ItemStack> list = be.getItems();
+                    for (int i = 0; i < list.size(); i++) {
+                        list.set(i, ItemStack.EMPTY);
+                    }
+                    save(be);                                   // 同一條執行緒、同一個 chunk key
+                }
+                // 最後一個 chunk 要靠閒置結算(沒有「下一個 chunk」來觸發);測試用反射叫一次 sweep 前先讓它閒置
+                Thread.sleep(2100);
+                java.lang.reflect.Method sweep = LazyContainerRuntime.class.getDeclaredMethod("sweepMassEmpty");
+                sweep.setAccessible(true);
+                sweep.invoke(null);
+            } finally {
+                System.setErr(oldErr);
+            }
+            String err = bo.toString();
+            assertEquals(1, LazyContainerRuntime.massEmpty.sum() - m0, "達門檻要記一次 MASS EMPTY:" + err);
+            assertTrue(err.contains("MASS EMPTY"), "要大聲報警:" + err);
+            assertTrue(err.contains("SAFE MODE"), "要就地降級:" + err);
+            java.io.File[] dumps = dir.listFiles();
+            assertTrue(dumps != null && dumps.length == 1, "要落一個檔");
+            assertTrue(dumps[0].getName().startsWith("lc-massempty-"), dumps[0].getName());
+            // 落檔要是可讀的 NBT:root compound → entries 列表 → 每筆有 x/y/z/Items
+            CompoundTag root;
+            java.io.DataInputStream in = new java.io.DataInputStream(new java.io.FileInputStream(dumps[0]));
+            try {
+                root = net.minecraft.nbt.NbtIo.read(in);
+            } finally {
+                in.close();
+            }
+            ListTag entries = root.getListOrEmpty("entries");
+            assertEquals(LazyContainerRuntime.MASS_EMPTY_MIN, entries.size(), "每個容器一筆");
+            CompoundTag e0 = entries.getCompoundOrEmpty(0);
+            assertEquals(3, e0.getListOrEmpty("Items").size(), "原始 Items 原封不動");
+        } finally {
+            if (old == null) System.clearProperty("lazycontainer.dump.dir"); else System.setProperty("lazycontainer.dump.dir", old);
+        }
+    }
+
+    @Test
+    @DisplayName("沒達門檻的「碰過之後歸零」→ 安靜(那就是玩家在搬家)")
+    void fewEmptiedAfterAccessIsSilent() throws Exception {
+        long m0 = LazyContainerRuntime.massEmpty.sum();
+        for (int n = 0; n < LazyContainerRuntime.MASS_EMPTY_MIN - 1; n++) {
+            EnsureRaceTest.TestChest be = loaded(items(3));
+            NonNullList<ItemStack> list = be.getItems();
+            for (int i = 0; i < list.size(); i++) {
+                list.set(i, ItemStack.EMPTY);
+            }
+            save(be);
+        }
+        Thread.sleep(2100);
+        java.lang.reflect.Method sweep = LazyContainerRuntime.class.getDeclaredMethod("sweepMassEmpty");
+        sweep.setAccessible(true);
+        sweep.invoke(null);
+        assertEquals(0, LazyContainerRuntime.massEmpty.sum() - m0, "門檻以下不得報警");
     }
 
     // ───────────────────────── 負向:必須安靜 ─────────────────────────
@@ -229,7 +356,7 @@ class SilentWipeGuardTest {
     @DisplayName("物化過程的重入 getItems 不算外部存取")
     void reentrantEnsureDoesNotCountAsAccess() {
         EnsureRaceTest.TestChest be = loaded(items(5));
-        be.lazycontainer$ensure();      // ensure 內部會呼叫 this.getItems() → leaf guard → ensureAccessed
+        be.lazycontainer$ensure();      // ensure 內部會呼叫 this.getItems() → leaf guard 的 accessed 標記
         assertTrue(be.lazycontainer$accessed == false,
                 "ensure 自己的重入不得把 accessed 設起來,否則守門對每個物化過的容器都永久失效");
     }

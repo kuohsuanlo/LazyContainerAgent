@@ -95,8 +95,12 @@ class EnsureRaceTest {
 
         @Override
         protected NonNullList<ItemStack> getItems() {
-            if (this.lazycontainer$pending) {          // = GUARD_ENSURE
-                this.lazycontainer$ensureAccessed();
+            // = GUARD_ENSURE(26.2-7):無條件標記 accessed(排除 ensure 自己的重入),再視 pending 物化
+            if (!this.lazycontainer$accessed && this.lazycontainer$ensuring != Thread.currentThread()) {
+                this.lazycontainer$accessed = true;
+            }
+            if (this.lazycontainer$pending) {
+                this.lazycontainer$ensure();
             }
             Runnable h = hook.getAndSet(null);
             if (h != null) {
