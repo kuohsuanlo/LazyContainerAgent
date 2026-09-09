@@ -570,7 +570,107 @@ public final class LazyContainerRuntime {
         return raw != null && raw.length >= 6 && raw[0] == 9;
     }
 
-    /** ListTag payload = [elemType byte][int32 length]…;不解析就能判空(shulker 的 allowEmpty=false 要用)。 */
+    /** ListTag payload = [elemType byte][int32 length]…;不解析就能讀出長度。 */
+    public static int rawListSize(byte[] raw) {
+        if (!rawIsListTag(raw)) {
+            return -1;
+        }
+        return ((raw[2] & 0xFF) << 24) | ((raw[3] & 0xFF) << 16) | ((raw[4] & 0xFF) << 8) | (raw[5] & 0xFF);
+    }
+
+    /**
+     * 這個輸出 compound「實際上會寫出幾筆 Items」。三種來源都算得出來,而且都不解析:
+     * 掛了側車 ⟹ 讀 raw 的 ListTag 表頭;有 Items 樹 ⟹ 讀 ListTag.size();什麼都沒有 ⟹ 0。
+     */
+    public static int writtenItemCount(Object compoundTag) {
+        if (compoundTag == null) {
+            return 0;
+        }
+        try {
+            byte[] side = attachedRaw(compoundTag);
+            if (side != null) {
+                int n = rawListSize(side);
+                return n < 0 ? 0 : n;
+            }
+        } catch (Throwable ignored) {
+            // 讀不到側車就當沒有
+        }
+        try {
+            java.lang.reflect.Method get = compoundTag.getClass().getMethod("get", String.class);
+            Object items = get.invoke(compoundTag, "Items");
+            if (items == null) {
+                return 0;
+            }
+            java.lang.reflect.Method size = items.getClass().getMethod("size");
+            Object n = size.invoke(items);
+            return n instanceof Integer ? ((Integer) n).intValue() : 0;
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    /** 讀回掛在 compound 上的側車 bytes(沒掛回 null)。 */
+    public static byte[] attachedRaw(Object compoundTag) {
+        if (RAW_FIELDS_MISSING || compoundTag == null || RAW_BYTES_FIELD == null) {
+            return null;
+        }
+        try {
+            return (byte[]) RAW_BYTES_FIELD.get(compoundTag);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 把側車拆掉(補寫時要用:補寫是寫一棵真的樹,不能讓側車再蓋上去)。 */
+    public static void detachRaw(Object compoundTag) {
+        if (RAW_FIELDS_MISSING || compoundTag == null || RAW_KEY_FIELD == null || RAW_BYTES_FIELD == null) {
+            return;
+        }
+        try {
+            RAW_KEY_FIELD.set(compoundTag, null);
+            RAW_BYTES_FIELD.set(compoundTag, null);
+        } catch (Throwable ignored) {
+            // 拆不掉就讓下面的比對再抓一次
+        }
+    }
+
+    // ── 寫入保真:寫出去的 vs 記憶體現在說的 ──────────────────────────────────────
+    //
+    // 服主指出的關鍵(2026-09-09):真相來源是**當下記憶體裡那份清單**,不是載入時那份。
+    // 玩家拿光,記憶體就是空的,那空的也是正確答案。所以不需要分「碰過/沒碰過」,也沒有複製的問題——
+    // 唯一要問的是「寫出去的東西跟記憶體現在說的一不一樣」。少了就是寫壞(寫空、寫少、寫錯地方),
+    // 當場用記憶體那份補寫回去。
+    public static final java.util.concurrent.atomic.LongAdder badWrite = new java.util.concurrent.atomic.LongAdder();
+    public static final java.util.concurrent.atomic.LongAdder badWriteFixed = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.AtomicInteger BADWRITE_LOGGED = new java.util.concurrent.atomic.AtomicInteger();
+
+    /**
+     * @param mem     記憶體現在有幾格非空
+     * @param written 這次原本要寫出去的筆數
+     * @param after   補寫之後的筆數(== mem 代表救回來了)
+     */
+    public static void onBadWrite(String pos, int mem, int written, int after) {
+        badWrite.increment();
+        boolean fixed = after >= mem;
+        if (fixed) {
+            badWriteFixed.increment();
+        }
+        if (BADWRITE_LOGGED.incrementAndGet() <= 200) {
+            System.err.println("[LazyContainer] BAD WRITE " + pos + " —— 記憶體裡有 " + mem
+                    + " 格東西,存檔卻只寫出 " + written + " 筆。"
+                    + (fixed ? "已用記憶體那份補寫回去(" + after + " 筆),資料沒有損失。"
+                             : "補寫後仍只有 " + after + " 筆,救不回來。")
+                    + " 這在正常運作下不可能發生,請立刻回報並保留這一行。");
+        }
+        tripSafeMode("容器 " + pos + " 寫入保真檢查失敗");
+    }
+
+    /** 紅綠驗證台:模擬「寫壞」——編碼完之後把 Items 從輸出樹上拔掉,記憶體完全正確。 */
+    public static boolean faultBadWrite() {
+        return faultHit("badWrite");
+    }
+
+
     public static boolean rawListIsEmpty(byte[] raw) {
         if (!rawIsListTag(raw)) {
             return false;
@@ -1208,6 +1308,7 @@ public final class LazyContainerRuntime {
                 + " badRaw=" + badRaw.sum()
                 + " silentWipe=" + silentWipe.sum() + "/" + silentWipeHealed.sum()
                 + " massEmpty=" + massEmpty.sum() + "/" + massEmptyContainers.sum()
+                + " badWrite=" + badWrite.sum() + "/" + badWriteFixed.sum()
                 + " keptRaw=" + keptRaw.get()
                 + (SAFE_MODE ? " SAFEMODE" : "")
                 + (PASSTHROUGH_SHADOW

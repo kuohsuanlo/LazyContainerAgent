@@ -291,6 +291,66 @@ class SilentWipeGuardTest {
         assertEquals(0, LazyContainerRuntime.massEmpty.sum() - m0, "門檻以下不得報警");
     }
 
+    // ───────────────────────── 寫入保真:記憶體 vs 寫出去的 ─────────────────────────
+
+    @Test
+    @DisplayName("寫入保真:記憶體有東西卻寫出空的 → 用記憶體那份補寫回去")
+    void badWriteIsRepairedFromMemory() {
+        EnsureRaceTest.TestChest be = loaded(items(5));
+        NonNullList<ItemStack> list = be.getItems();        // 物化 + 標記碰過(記憶體才是真相來源)
+        assertEquals(5, countNonEmpty(list));
+
+        long b0 = LazyContainerRuntime.badWrite.sum();
+        long f0 = LazyContainerRuntime.badWriteFixed.sum();
+        TagValueOutput out = TagValueOutput.createWithContext(ProblemReporter.DISCARDING, NmsTestSupport.registries());
+        be.lazycontainer$saveBrokenForTest(out);            // 編碼完把 Items 拔掉
+
+        assertEquals(1, LazyContainerRuntime.badWrite.sum() - b0, "寫壞了要報一次");
+        assertEquals(1, LazyContainerRuntime.badWriteFixed.sum() - f0, "而且要補寫成功");
+        Tag saved = out.buildResult().get("Items");
+        assertNotNull(saved, "補寫後 Items 必須存在");
+        assertEquals(5, ((ListTag) saved).size(), "五格用記憶體那份補回來");
+    }
+
+    @Test
+    @DisplayName("寫入保真:玩家拿光 → 記憶體是空的,寫空的就是對的,不得報警")
+    void emptyMemoryWritesEmptyWithoutAlarm() {
+        EnsureRaceTest.TestChest be = loaded(items(5));
+        NonNullList<ItemStack> list = be.getItems();
+        for (int i = 0; i < list.size(); i++) {
+            list.set(i, ItemStack.EMPTY);
+        }
+        long b0 = LazyContainerRuntime.badWrite.sum();
+        Tag saved = save(be);
+        assertEquals(0, LazyContainerRuntime.badWrite.sum() - b0, "記憶體說空的,寫空的不是寫壞");
+        assertNotNull(saved);
+        assertEquals(0, ((ListTag) saved).size());
+    }
+
+    @Test
+    @DisplayName("寫入保真:還沒物化的容器拿 raw 當真相(側車沒掛上 → 補寫)")
+    void pendingContainerVerifiedAgainstRaw() {
+        EnsureRaceTest.TestChest be = loaded(items(5));
+        assertTrue(be.lazycontainer$pending, "前提:還沒物化");
+        long b0 = LazyContainerRuntime.badWrite.sum();
+        TagValueOutput out = TagValueOutput.createWithContext(ProblemReporter.DISCARDING, NmsTestSupport.registries());
+        be.lazycontainer$saveBrokenForTest(out);
+        assertEquals(1, LazyContainerRuntime.badWrite.sum() - b0, "raw 有 5 筆卻寫出 0 筆 ⟹ 要報");
+        Tag saved = out.buildResult().get("Items");
+        assertNotNull(saved, "要用 raw 補寫回去");
+        assertEquals(5, ((ListTag) saved).size());
+    }
+
+    private static int countNonEmpty(NonNullList<ItemStack> list) {
+        int n = 0;
+        for (int i = 0; i < list.size(); i++) {
+            if (!list.get(i).isEmpty()) {
+                n++;
+            }
+        }
+        return n;
+    }
+
     // ───────────────────────── 負向:必須安靜 ─────────────────────────
 
     @Test

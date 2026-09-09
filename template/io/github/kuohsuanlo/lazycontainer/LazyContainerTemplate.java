@@ -537,10 +537,107 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                 + this.lazycontainer$posForLog() + " 的清單已被清空");
     }
 
+    /**
+     * <b>寫入保真檢查</b>(2026-09-09,服主提案)。
+     *
+     * <p>真相來源是<b>當下記憶體裡那份清單</b>,不是載入時那份。玩家拿光,記憶體就是空的,那空的也是
+     * 正確答案,照樣寫空的回去。所以這裡不分「碰過/沒碰過」,也沒有把玩家拿走的東西變回來的問題——
+     * 唯一要問的是:<b>寫出去的東西,跟記憶體現在說的一不一樣?</b></p>
+     *
+     * <p>少了就是寫壞了(寫空、寫少、寫到別的地方去),當場把側車拆掉、用記憶體那份重寫一次,並且報警。
+     * 三種輸出來源都算得出筆數而且都不解析:側車讀 ListTag 表頭、Items 樹讀 size、什麼都沒有算 0。</p>
+     *
+     * <p><b>還沒物化的容器(pending)記憶體清單本來就是空的</b>,那不是寫壞——它的內容在 raw 裡,
+     * 而 raw 的筆數只會 ≥ 0,所以「寫出去的 ≥ 記憶體的」恆成立,不會誤報。</p>
+     *
+     * <p>呼叫端持 monitor,所以這段期間 items 不會被別人改。成本:一趟 ≤27 格的掃描 + 一個 size 讀取。</p>
+     */
+    private void lazycontainer$verifyWrite(ValueOutput output, NonNullList<ItemStack> items) {
+        if (!(output instanceof TagValueOutput)) {
+            return;
+        }
+        // 「記憶體現在說有幾筆」:還沒物化的容器,內容在 raw 裡(清單本來就是空的,那不是寫壞);
+        // 已物化的容器,內容就是清單本身。兩種都算得出來,而且都不解析。
+        byte[] rawBytes = this.lazycontainer$raw;
+        boolean fromRaw = this.lazycontainer$pending && rawBytes != null;
+        int mem;
+        if (fromRaw) {
+            mem = LazyContainerRuntime.rawListSize(rawBytes);
+        } else {
+            mem = 0;
+            for (int i = 0; i < items.size(); i++) {
+                if (!items.get(i).isEmpty()) {
+                    mem++;
+                }
+            }
+        }
+        if (mem <= 0) {
+            return;                                     // 記憶體說空的 ⟹ 寫什麼都不算少
+        }
+        CompoundTag out = ((TagValueOutput) output).buildResult();
+        int written = LazyContainerRuntime.writtenItemCount(out);
+        if (written >= mem) {
+            return;                                     // 沒寫少 ⟹ 沒寫壞
+        }
+        // 寫壞了。把側車拆掉(補寫是寫一棵真的樹),用「記憶體現在說的那份」重寫一次。
+        LazyContainerRuntime.detachRaw(out);
+        out.remove("Items");
+        if (fromRaw) {
+            try {
+                Tag revived = lazycontainer$decodeRaw(rawBytes);
+                if (revived instanceof ListTag) {
+                    out.put("Items", revived);
+                }
+            } catch (Throwable ignored) {
+                // 解不開就只剩報警
+            }
+        } else {
+            ContainerHelper.saveAllItems(output, items);
+        }
+        int after = LazyContainerRuntime.writtenItemCount(((TagValueOutput) output).buildResult());
+        LazyContainerRuntime.onBadWrite(this.lazycontainer$posForLog(), mem, written, after);
+    }
+
+    /**
+     * 只給單元測試用:走完整的存檔路徑,但在編碼完之後把 Items 從輸出樹上拔掉,
+     * 模擬「記憶體完全正確、寫出去卻壞了」。正式執行期沒有任何呼叫點。
+     */
+    public synchronized void lazycontainer$saveBrokenForTest(ValueOutput output) {
+        NonNullList<ItemStack> items = this.getItems0ForTest();
+        if (!this.lazycontainer$trySaveRaw(output, true)) {
+            ContainerHelper.saveAllItems(output, items);
+        }
+        if (output instanceof TagValueOutput) {
+            CompoundTag out = ((TagValueOutput) output).buildResult();
+            LazyContainerRuntime.detachRaw(out);
+            out.remove("Items");
+        }
+        this.lazycontainer$verifyWrite(output, items);
+    }
+
+    /** 測試子類覆寫成「不經 guard 的清單」;正式的 leaf 不會用到。 */
+    protected NonNullList<ItemStack> getItems0ForTest() {
+        return this.getItems();
+    }
+
+    /** 紅綠驗證台:模擬「編碼完之後寫壞」——把 Items 從輸出樹上拔掉,記憶體完全正確。 */
+    private void lazycontainer$maybeInjectBadWrite(ValueOutput output) {
+        if (!(output instanceof TagValueOutput) || !LazyContainerRuntime.faultBadWrite()) {
+            return;
+        }
+        CompoundTag out = ((TagValueOutput) output).buildResult();
+        LazyContainerRuntime.detachRaw(out);
+        out.remove("Items");
+        System.err.println("[LazyContainer] FAULT badWrite: " + this.lazycontainer$posForLog()
+                + " 的 Items 已從輸出樹上拔掉(記憶體完全正確)");
+    }
+
     /** 取代 {@code ContainerHelper.saveAllItems(output, items)}(allowEmpty=true:chest/barrel)。 */
     public synchronized void lazycontainer$save(ValueOutput output, NonNullList<ItemStack> items) {
         this.lazycontainer$maybeInjectWipe(items);
         if (this.lazycontainer$trySaveRaw(output, true)) {
+            this.lazycontainer$maybeInjectBadWrite(output);
+            this.lazycontainer$verifyWrite(output, items);
             return;                                     // pending:原樣寫回,raw 留著(下次還要用)
         }
         try {
@@ -549,6 +646,8 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
             }
             this.lazycontainer$noteEmptiedAfterAccess(items);
             ContainerHelper.saveAllItems(output, items);
+            this.lazycontainer$maybeInjectBadWrite(output);
+            this.lazycontainer$verifyWrite(output, items);
         } finally {
             this.lazycontainer$releaseKeptRaw();        // 物化後的第一次存檔 = 沒報錯就釋放
         }
@@ -558,6 +657,8 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
     public synchronized void lazycontainer$saveNoEmpty(ValueOutput output, NonNullList<ItemStack> items) {
         this.lazycontainer$maybeInjectWipe(items);
         if (this.lazycontainer$trySaveRaw(output, false)) {
+            this.lazycontainer$maybeInjectBadWrite(output);
+            this.lazycontainer$verifyWrite(output, items);
             return;
         }
         try {
@@ -566,6 +667,8 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
             }
             this.lazycontainer$noteEmptiedAfterAccess(items);
             ContainerHelper.saveAllItems(output, items, false);
+            this.lazycontainer$maybeInjectBadWrite(output);
+            this.lazycontainer$verifyWrite(output, items);
         } finally {
             this.lazycontainer$releaseKeptRaw();
         }

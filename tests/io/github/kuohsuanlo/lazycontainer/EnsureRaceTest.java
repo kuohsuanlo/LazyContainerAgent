@@ -114,6 +114,11 @@ class EnsureRaceTest {
             return items;
         }
 
+        @Override
+        protected NonNullList<ItemStack> getItems0ForTest() {
+            return items;                              // 寫入保真測試要的是「不經 guard 的當下清單」
+        }
+
         /**
          * 忠實模擬改寫後 leaf {@code loadAdditional} 的 offset 16:
          * {@code putfield items = NonNullList.withSize(...)} —— <b>裸欄位寫、不在 monitor 內、無任何 guard</b>。
