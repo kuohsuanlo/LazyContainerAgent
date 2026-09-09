@@ -11,6 +11,8 @@
 #   wipeAccessed     有人碰過之後才被清空       ⟹ 不得自動寫回(那可能是玩家拿光的),整個 chunk 大面積歸零時
 #                                                 必須 MASS EMPTY 落檔 + 報警 + SAFE MODE;磁碟會掉,但救援檔裡一個都不少
 #   corruptRaw       raw 被改壞一個 byte       ⟹ 核心自己的 NbtIo 解爆,必須亮 BAD RAW + SAFE MODE
+#   badWrite         編碼完之後 Items 被拔掉    ⟹ 記憶體完全正確、寫出去卻是壞的。寫入保真檢查必須抓到,
+#                                                 用記憶體那份補寫回去,磁碟零流失
 #   dropSideCar      直寫的側車被吞掉           ⟹ rawEmit 追不上 rawPassthrough,必須亮 BAD PASSTHROUGH;
 #                                                 而且磁碟上的指紋必須是「缺 Items 鍵」而不是「空清單」
 #
@@ -18,7 +20,7 @@
 LC_TIER=RED
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 E=$LC_OUT/red; mkdir -p "$E"
-ROUNDS="${LC_RED_ROUNDS:-green wipeKeepRaw wipe wipe-noguard wipeAccessed corruptRaw dropSideCar}"
+ROUNDS="${LC_RED_ROUNDS:-green wipeKeepRaw wipe wipe-noguard wipeAccessed badWrite corruptRaw dropSideCar}"
 EVERY="${LC_RED_EVERY:-50}"          # 每 N 個容器注入一次
 
 flags_of() {
@@ -31,6 +33,7 @@ flags_of() {
     wipeAccessed) echo "$a -Dlazycontainer.fault=wipeAccessed -Dlazycontainer.fault.every=${LC_RED_EVERY_CHUNK:-10}" ;;   # 按 chunk 打:每 10 個 chunk 選一個全清
     corruptRaw)   echo "$a -Dlazycontainer.fault=corruptRaw -Dlazycontainer.fault.every=$EVERY" ;;
     dropSideCar)  echo "$a -Dlazycontainer.fault=dropSideCar -Dlazycontainer.fault.every=$EVERY" ;;
+    badWrite)     echo "$a -Dlazycontainer.fault=badWrite -Dlazycontainer.fault.every=$EVERY" ;;
   esac
 }
 
@@ -173,6 +176,15 @@ case " $ROUNDS " in *" dropSideCar "*)
   [ "${nk:-0}" -gt "${ik:-0}" ] \
     && ok "[dropSideCar] 磁碟指紋 = 缺 Items 鍵(輸入 ${ik:-0} → 輸出 ${nk:-0}),與『空清單』是不同機制" \
     || fail "[dropSideCar] 缺鍵數沒有增加(輸入 ${ik:-0} → 輸出 ${nk:-0})—— 指紋假設不成立"
+;; esac
+
+case " $ROUNDS " in *" badWrite "*)
+  [ "$(n badWrite 'FAULT badWrite')" -gt 0 ] && ok "[badWrite] 故障真的注入了($(n badWrite 'FAULT badWrite') 次)" || fail "[badWrite] 故障沒注入,這一回合不算數"
+  bw=$(grep -oE "badWrite=[0-9]+/[0-9]+" "$E/badWrite.counters" | head -1); bwn=${bw#badWrite=}; bwd=${bwn%%/*}; bwf=${bwn##*/}
+  [ "${bwd:-0}" -gt 0 ] && ok "[badWrite] 亮紅:BAD WRITE $(n badWrite 'BAD WRITE') 行、計數器 badWrite=$bwn(偵測/補寫)" || fail "[badWrite] 寫壞了卻沒抓到"
+  [ "${bwf:-0}" = "${bwd:-1}" ] && ok "[badWrite] 補寫 $bwf/$bwd —— 全部用記憶體那份補回去了" || fail "[badWrite] 補寫只有 $bwf/$bwd"
+  [ "$(emptied badWrite)" = 0 ] && ok "[badWrite] 磁碟零流失(記憶體是真相來源)" || fail "[badWrite] 磁碟流失 $(emptied badWrite) 個容器"
+  [ "$(n badWrite 'SAFE MODE')" -gt 0 ] && ok "[badWrite] 自動降級 SAFE MODE 觸發" || fail "[badWrite] 沒有降級"
 ;; esac
 
 tier_verdict
