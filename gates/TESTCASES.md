@@ -141,7 +141,7 @@ bot 操作 5 種(`open` / `pickput` / `move` / `take` / `dig`)+ 卸載重載 + �
 `slot`+`item`、`all_empty`、`emptied`、`moved_from`+`moved_to`、`others_contains`、`equals_source`,
 **外加「沒被指定的格不准變」**。
 
-## 五之二、存檔守門 + keep raw(`SilentWipeGuardTest`,13 例)
+## 五之二、存檔守門 + keep raw + 寫入保真(`SilentWipeGuardTest`,16 例)
 
 守的不變式:**這個容器載入時有東西、從載入到現在沒有任何存取點碰過它、存檔卻要寫出空的。**
 正常運作下不可能成立 —— 沒被碰過的容器是把載入時收下的原始位元組原樣寫回去的;而任何合法的取走
@@ -165,6 +165,9 @@ bot 操作 5 種(`open` / `pickput` / `move` / `take` / `dig`)+ 卸載重載 + �
 | `loadedEmptyIsSilent` | 載入時本來就是空的 ⟹ 安靜 |
 | `setItemsIsSilent` | `setItems` 整批換清單(GUARD_CLEAR)⟹ 安靜 |
 | `partiallyEmptiedIsSilent` | 還剩一格有東西 ⟹ 安靜 |
+| `badWriteIsRepairedFromMemory` | 記憶體有 5 格、輸出樹被拔掉 ⟹ `BAD WRITE` + 用記憶體那份補回 5 筆 |
+| `emptyMemoryWritesEmptyWithoutAlarm` | 玩家拿光 ⟹ 記憶體是空的,寫空的就是對的,不得報警 |
+| `pendingContainerVerifiedAgainstRaw` | 還沒物化的容器清單本來就空,真相在 raw ⟹ 拿 `rawListSize` 當比對基準,側車沒掛上就補寫 |
 | `reentrantEnsureDoesNotCountAsAccess` | `ensure()` 內部的 `getItems()` 重入不算外部存取(靠 `ensuring==currentThread` 排除) |
 
 成本:guard 熱路徑多一個 volatile 讀(`accessed`,x86 上是普通 load);寫每個容器每次載入至多一次。
@@ -186,6 +189,7 @@ bot 操作 5 種(`open` / `pickput` / `move` / `take` / `dig`)+ 卸載重載 + �
 | `wipeAccessed` | 有人碰過之後才被清空 | **不得自動寫回**;整個 chunk 大面積歸零 ⟹ `MASS EMPTY` + 救援檔一個不少 + `SAFE MODE` |
 | `wipe-noguard` | 同上,但 `-Dlazycontainer.guard=false` | **沒有任何警報,而且磁碟真的掉容器**(對照組) |
 | `corruptRaw` | raw 被改壞一個 byte | `BAD RAW` + `lc-badraw` 落檔 + `SAFE MODE` |
+| `badWrite` | 編碼完之後 Items 被拔掉(記憶體完全正確) | `BAD WRITE` + `SAFE MODE`,**用記憶體那份補寫 ⟹ 磁碟零流失** |
 | `dropSideCar` | 直寫的側車被吞掉 | `BAD PASSTHROUGH` + `SAFE MODE`,而且磁碟指紋必須是**缺 Items 鍵** |
 
 故障注入預設全關,啟用時開機會印一整段 `FAULT INJECTION ACTIVE` 大字,G4 每個模式都會
