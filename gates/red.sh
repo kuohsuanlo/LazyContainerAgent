@@ -119,8 +119,21 @@ for f in glob.glob(os.path.join(sys.argv[1], '*.nbt')):
 print(n)
 PY2
 )
-  # 磁碟上「達門檻的 chunk」共掉了幾個(門檻以下的 chunk 本來就不落檔——那是玩家搬家的份量)
-  expect=$(awk -v m="${LC_MASS_EMPTY_MIN:-8}" '/歸零容器 [0-9]+ 個/ { if (match($0, /歸零容器 [0-9]+/)) { n=substr($0, RSTART+5, RLENGTH-5)+0; if (n>=m) s+=n } } END { print s+0 }' "$E/wipeAccessed.loss")
+  # 磁碟上「達門檻的 chunk」共掉了幾個(門檻以下的 chunk 本來就不落檔——那是玩家搬家的份量)。
+  # 用 Python 不用 awk:awk 的 substr/RSTART 是位元組偏移,中文字 3 bytes,算出來永遠是 0,斷言等於沒驗(實測踩到)。
+  expect=$(python3 - "$E/wipeAccessed.loss" "${LC_MASS_EMPTY_MIN:-8}" <<'PY3'
+import sys, re
+m = int(sys.argv[2]); cur = None; over = 0
+for line in open(sys.argv[1], encoding='utf-8'):
+    a = re.search(r'\[警報\] .* \((-?\d+), (-?\d+)\)', line)
+    if a: cur = a.group(0); continue
+    b = re.search(r'歸零容器 (\d+) 個', line)
+    if b and cur:
+        n = int(b.group(1))
+        if n >= m: over += n
+print(over)
+PY3
+)
   [ "${saved:-0}" -ge "${expect:-1}" ] && [ "${saved:-0}" -gt 0 ] \
     && ok "[wipeAccessed] 救援檔裡 $saved 個容器 ≥ 達門檻 chunk 磁碟掉的 $expect 個 —— 一個都不少(全部 $(emptied wipeAccessed) 個中,門檻以下的不落檔)" \
     || fail "[wipeAccessed] 救援檔裡只有 ${saved:-0} 個,達門檻的 chunk 磁碟掉了 ${expect:-?} 個"
