@@ -167,7 +167,7 @@ mkdir -p $LC_GATE_HOME/fixtures/w1 && cp <你的世界>/region/r.0.0.mca $LC_GAT
 | **直寫觀測模式** `passthrough.shadow` | `03926b6` | 上線前一天用真路徑對帳:磁碟照舊寫解析出的樹,直寫只做探針 | G4 模式 C | `ptShadowOk` 大量、`ptShadowMismatch=0`、`rawPassthrough=0` | G4 |
 | **`BAD RAW` log 格式 + 看門貓整合** | `7cdd04f` | 面板的區塊救援偵測器要能從 log 定位並自動建案 | 面板 `chunkguard.py` 的 `HIT_RE` | 行內含 `minecraft:<維度> chunk (cx, cz) block x, y, z` | 面板端(不在本 gate) |
 | **直寫對帳告警 `rawEmit`** | 26.2-6 | **換版唯一「不會自己爆」的失效模式**:三個 hook 都 armed、`attachRaw` 成功、`rawPassthrough` 照加,但核心若在存檔鏈中途重建 CompoundTag,側車會被靜默丟掉 ⟹ 箱子存成空。唯一外顯訊號就是「掛上去的次數」追不上「真的寫出去的次數」 | `PassthroughDeficitTest` 五例(側車全丟 / 永久性小額落後 → 都要告警;正常運作 / 會回補的爆量 / 一次性尖峰 → 都不得告警)+ RED 的 `dropSideCar` 回合(真伺服器上故意吞側車) | 判準看**差額的低水位**:最近 5 輪差額的最小值整個視窗都高於 64 才印 `BAD PASSTHROUGH`,並就地降級。IO 落後會回補所以低水位掉得回 0;側車真的被丟掉則低水位被永久墊高。⚠ 前兩版判準都是死的——第一版只看「差額不降」會在爆量存檔誤報;第二版加了「這一輪沒有新側車掛上」又要求差額 ≥ 4096,結果紅綠驗證台故意吞掉 565 個側車時一行都沒印(2026-09-09 實測) | G3、G4-A、G7、RED |
-| **存檔守門(靜默清空)+ 自動降級** | 26.2-7(本次新增) | 2026-09-08 s3 商場單一 chunk 內 154 個容器同時歸零(面板 #121)。當時 agent 對「內容在沒人碰的情況下消失」零偵測能力:寫到磁碟上的是一個結構完全合法的空清單,只能靠備份事後對帳。守門把它變成**存檔當下就叫的警報**,並在原始 bytes 還在時當場寫回去,同時就地關掉直寫(之後全走解析路徑,不必重啟) | `SilentWipeGuardTest` 八例:三正向(raw 還在→自救、raw 已被物化吃掉→拒寫空的、報警要降級)、五負向(玩家正當取光 / 載入時本來就空 / setItems 換清單 / 還有東西 / 物化重入)全部必須安靜 | 熱路徑只有兩個 boolean 讀,沒有任何解碼;`silentWipe=0/0` 且 log 無 `SILENT WIPE`、無 `SAFE MODE` | G3、G4 |
+| **存檔守門(靜默清空)+ keep raw 寫回 + 自動降級** | 26.2-7 | 2026-09-08 s3 商場單一 chunk 內 154 個容器同時歸零(面板 #121)。當時 agent 對「內容在沒人碰的情況下消失」零偵測能力。守門把它變成**存檔當下就叫的警報**;而且容器物化後 raw 不再立刻作廢,留到第一次存檔/卸載/10 分鐘,攔到就**用留著的 raw 寫回去**(服主要的:沒報錯就釋放、報錯就重新走原本的寫入),同時就地關掉直寫。「有人碰過之後才變空」分不出玩家拿光還是程式清空,**不寫回**(寫回 = 複製),改成整個 chunk 大面積歸零時把所有原始 bytes 落成可讀 NBT(`lc-massempty-*.nbt`)+ `MASS EMPTY` + 降級 | `SilentWipeGuardTest` 13 例:物化後沒人碰→寫回並釋放、存檔正常→釋放、到期→釋放、碰過後變空→絕不寫回、≥8 個碰過後歸零→落檔+報警、<8→安靜、玩家取光/載入即空/setItems/還有東西/物化重入→全部安靜 | 熱路徑:guard 多一個 volatile 讀(標記 accessed);`silentWipe=偵測/自救`、`massEmpty=chunk數/容器數`、`keptRaw=目前留著的容器數`;RED 的 `wipe` 回合要磁碟零流失、`wipeAccessed` 回合要救援檔一個不少 | G3、G4、RED |
 | **外部流失偵測 `tools/container_loss_watch.py`** | 26.2-7(本次新增) | agent 自己出錯時,它的自我回報也不能信。這支只吃兩份 region 檔(通常是每日備份 vs 線上),以 chunk 為單位找「上一份有東西、這一份變空」的容器 —— 不看 log、不問計數器 | 拿 s3 事故的備份/損壞兩份 region 實跑:命中 chunk (196, -198),歸零 154 個、流失 4,861,635 件 | 超過門檻回離開碼 1(給 cron 判斷發不發警報) | 手動/cron |
 | **還原工具 `tools/mca_restore.py`** | `03926b6` | 真出事要救得回來:純位元組拼接、不重新編碼(重寫等於在每個欄位上重賭一次) | G7 對每份輸出跑 `verify --deep` | 「沒有發現問題」;寫入前確認 `session.lock` 沒被鎖、沒有程序開著該檔、先備份 | G7 |
 
@@ -187,7 +187,9 @@ mkdir -p $LC_GATE_HOME/fixtures/w1 && cp <你的世界>/region/r.0.0.mca $LC_GAT
 | `-Dlazycontainer.shadow=true` | 影子驗證:輸出等同原版、只回報不改資料 | G6 |
 | `-Dlazycontainer.passthrough=false` | 關掉存檔直寫(回 26.2-2 舊路徑) | G4 模式 B |
 | `-Dlazycontainer.passthrough.shadow=true` | 直寫觀測模式 | G4 模式 C |
-| `-Dlazycontainer.fault=corruptRaw\|wipe\|wipeKeepRaw` | **故障注入,只給紅綠驗證台**。啟用時開機印一整段大字,G4 會 grep 那段字判紅 | RED |
+| `-Dlazycontainer.keepRaw.ms` | 物化後留著 raw 的上限(預設 600000 = 10 分鐘);到期由統計執行緒釋放 | RED、G3 |
+| `-Dlazycontainer.massEmpty.min` | 同一次存檔裡「碰過之後歸零」幾個容器才算大面積(預設 8) | RED、G3 |
+| `-Dlazycontainer.fault=corruptRaw\|wipe\|wipeKeepRaw\|wipeAccessed\|dropSideCar` | **故障注入,只給紅綠驗證台**。啟用時開機印一整段大字,G4 會 grep 那段字判紅 | RED |
 | `-Dlazycontainer.guard=false` | 關掉存檔守門(紅綠驗證台的對照組) | RED |
 | (無旗標)自動降級 SAFE MODE | 偵測到靜默清空或壞 raw 就**就地**關閉直寫,之後每次存檔都走解析路徑;重啟才恢復 | G3、G4 |
 | `-Dlazycontainer.summary=false` | 關掉漏斗摘要快答 | (手動;G6 是開著驗) |

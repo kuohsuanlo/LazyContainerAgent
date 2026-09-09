@@ -141,28 +141,36 @@ bot 操作 5 種(`open` / `pickput` / `move` / `take` / `dig`)+ 卸載重載 + �
 `slot`+`item`、`all_empty`、`emptied`、`moved_from`+`moved_to`、`others_contains`、`equals_source`,
 **外加「沒被指定的格不准變」**。
 
-## 五之二、存檔守門(`SilentWipeGuardTest`,8 例)
+## 五之二、存檔守門 + keep raw(`SilentWipeGuardTest`,13 例)
 
 守的不變式:**這個容器載入時有東西、從載入到現在沒有任何存取點碰過它、存檔卻要寫出空的。**
 正常運作下不可能成立 —— 沒被碰過的容器是把載入時收下的原始位元組原樣寫回去的;而任何合法的取走
 (玩家、漏斗、比較器、外掛、指令)都必須先走 `getItems()/getContents()`,那就會把 `accessed` 設起來。
 
-誤報比漏報更糟(把玩家正當取走的東西寫回去 = 複製),所以五個負向案例的份量比正向多。
+26.2-7 起容器物化後 raw **留著**(到第一次存檔/卸載/10 分鐘),所以攔到就真的寫得回去。
+誤寫回比漏報更糟(把玩家正當取走的東西寫回去 = 複製),所以負向案例的份量比正向多,
+而且「有人碰過之後才變空」這一類**永遠不寫回**,改走 chunk 級落檔。
 
 | 測試 | 守什麼 |
 |---|---|
-| `wipedButRawStillThere` | raw 還在 ⟹ 當場寫回原始五格,`silentWipeHealed` +1 |
-| `wipedAfterMaterialization` | raw 已被物化吃掉 ⟹ 救不回來,但**不寫出空的 Items**,`silentWipe` +1 且 healed 不加 |
-| `alarmTripsSafeMode` | 報警同時就地降級:`passthrough()` 之後恆為 false(不必重啟) |
+| `wipedButRawStillThere` | 撕裂狀態(pending 已清、raw 還在)⟹ 當場寫回原始五格 |
+| `wipedAfterMaterializationIsHealed` | 物化過、沒人碰過 ⟹ raw 留著,寫回五格,存完釋放(`raw==null`、`keptSince==0`) |
+| `keptRawReleasedAfterCleanSave` | 存檔正常 ⟹ 不報警、釋放(沒報錯就釋放) |
+| `keptRawExpires` | 到期 ⟹ 釋放並回報可從登記名單移除 |
+| `alarmTripsSafeMode` | 報警同時就地降級 |
+| `emptiedAfterAccessIsNeverHealed` | 經 `getItems()` 碰過再變空 ⟹ **絕不寫回**,照常寫出空清單、不報靜默清空 |
+| `massEmptyDumpsAndAlarms` | 同一執行緒同一 chunk ≥8 個「碰過之後歸零」⟹ `MASS EMPTY` + `SAFE MODE` + 落一個可讀的 NBT 檔(`{entries:[{x,y,z,Items}]}`,每筆原始 Items 原封不動) |
+| `fewEmptiedAfterAccessIsSilent` | 7 個 ⟹ 安靜(那就是玩家在搬家) |
 | `legitimateEmptyingIsSilent` | 玩家經 `getItems()` 取光 ⟹ 安靜,照常寫出空清單 |
 | `loadedEmptyIsSilent` | 載入時本來就是空的 ⟹ 安靜 |
 | `setItemsIsSilent` | `setItems` 整批換清單(GUARD_CLEAR)⟹ 安靜 |
-| `partiallyEmptiedIsSilent` | 還剩一格有東西 ⟹ 安靜(守門只管全空) |
-| `reentrantEnsureDoesNotCountAsAccess` | `ensure()` 內部呼叫 `this.getItems()` 會再走一次 leaf guard;若把它算成存取,守門對每個物化過的容器永久失效 |
+| `partiallyEmptiedIsSilent` | 還剩一格有東西 ⟹ 安靜 |
+| `reentrantEnsureDoesNotCountAsAccess` | `ensure()` 內部的 `getItems()` 重入不算外部存取(靠 `ensuring==currentThread` 排除) |
 
-成本:熱路徑只有兩個 boolean 讀。`loadedNonEmpty` 在載入時由 `rawListIsEmpty` 讀 6 個 byte 的
-ListTag 表頭算出(不解析);`accessed` 是一個 volatile 寫,而且只在 `pending` 還是 true 時走得到
-(每個容器每次載入至多一次)。解碼只發生在報警分支,那條路正常應該永遠不會執行。
+成本:guard 熱路徑多一個 volatile 讀(`accessed`,x86 上是普通 load);寫每個容器每次載入至多一次。
+`loadedNonEmpty` 由 ListTag 表頭 6 個 byte 算出(不解析)。留著的 raw 是 bytes(不是樹),
+只有物化過的容器才留,而且第一次存檔就放掉;唯讀物化(不弄髒 chunk)靠 10 分鐘到期兜底。
+解碼只發生在寫回分支(而且先試零解析的側車,只有非 chunk 存檔的呼叫者才解樹)。
 
 ## 五之三、紅綠驗證台(`gates/red.sh`)
 
@@ -174,7 +182,8 @@ ListTag 表頭算出(不解析);`accessed` 是一個 volatile 寫,而且只在 `
 |---|---|---|
 | `green` | 不注入 | 完全安靜、磁碟零流失(沒有假紅) |
 | `wipeKeepRaw` | 清單被清空,但 raw 還在 | **磁碟零流失**:沒被碰過的容器本來就是原樣寫回,這是主要防線 |
-| `wipe` | 清單被清空,raw 已被物化吃掉 | `SILENT WIPE` + `silentWipe` 計數器 + `SAFE MODE` |
+| `wipe` | 物化過、沒人碰過就被清空 | `SILENT WIPE` + `SAFE MODE`,**而且用留著的 raw 寫回 ⟹ 磁碟零流失** |
+| `wipeAccessed` | 有人碰過之後才被清空 | **不得自動寫回**;整個 chunk 大面積歸零 ⟹ `MASS EMPTY` + 救援檔一個不少 + `SAFE MODE` |
 | `wipe-noguard` | 同上,但 `-Dlazycontainer.guard=false` | **沒有任何警報,而且磁碟真的掉容器**(對照組) |
 | `corruptRaw` | raw 被改壞一個 byte | `BAD RAW` + `lc-badraw` 落檔 + `SAFE MODE` |
 | `dropSideCar` | 直寫的側車被吞掉 | `BAD PASSTHROUGH` + `SAFE MODE`,而且磁碟指紋必須是**缺 Items 鍵** |

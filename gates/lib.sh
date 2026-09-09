@@ -36,6 +36,17 @@ rig_send() { tmux send-keys -t "$LC_TMUX" -l "$1"; sleep 0.4; tmux send-keys -t 
 # rig_boot <console.log> <額外 java 旗標...>
 rig_boot() {
   local console="$1"; shift
+  # 埠先驗:被佔走時 Paper 只會印一行 "Address already in use" 然後照常走完關機流程,
+  # 外面看到的只是「開機失敗」,分不出是 agent 炸了還是埠被別人拿走(2026-09-09 實測:
+  # 25599 被另一個專案的測試伺服器佔走,紅綠驗證台整輪報開機失敗)。這裡直接講出是誰佔的。
+  local holder
+  holder=$(ss -ltnp 2>/dev/null | awk -v p=":$LC_RIG_PORT " 'index($4, p) {print $NF}' | head -1)
+  if [ -n "$holder" ]; then
+    local hpid; hpid=$(echo "$holder" | grep -oE 'pid=[0-9]+' | cut -d= -f2)
+    echo "埠 $LC_RIG_PORT 已被占用:$holder cwd=$(readlink /proc/${hpid:-0}/cwd 2>/dev/null)"
+    echo "  ⟹ 換一個埠:LC_RIG_PORT=<空的埠> bash gates/run.sh …(不要去殺那個程序,它可能是別人的)"
+    return 1
+  fi
   clear_forced_chunks
   rm -rf "$LC_RIG/logs"; mkdir -p "$LC_RIG/logs"
   tmux new-session -d -s "$LC_TMUX" -c "$LC_RIG"
