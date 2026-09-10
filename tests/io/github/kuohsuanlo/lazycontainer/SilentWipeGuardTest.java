@@ -236,7 +236,7 @@ class SilentWipeGuardTest {
                     EnsureRaceTest.TestChest be = loaded(items(3));
                     NonNullList<ItemStack> list = be.getItems();
                     for (int i = 0; i < list.size(); i++) {
-                        list.set(i, ItemStack.EMPTY);
+                        list.set(i, ItemStack.EMPTY);       // 整個 chunk 全清 = 佔比 100%
                     }
                     save(be);                                   // 同一條執行緒、同一個 chunk key
                 }
@@ -264,7 +264,7 @@ class SilentWipeGuardTest {
                 in.close();
             }
             ListTag entries = root.getListOrEmpty("entries");
-            assertEquals(LazyContainerRuntime.MASS_EMPTY_MIN, entries.size(), "每個容器一筆");
+            assertEquals(LazyContainerRuntime.MASS_EMPTY_MIN, entries.size(), "每個容器一筆(全清=100% 佔比)");
             CompoundTag e0 = entries.getCompoundOrEmpty(0);
             assertEquals(3, e0.getListOrEmpty("Items").size(), "原始 Items 原封不動");
         } finally {
@@ -273,7 +273,33 @@ class SilentWipeGuardTest {
     }
 
     @Test
-    @DisplayName("沒達門檻的「碰過之後歸零」→ 安靜(那就是玩家在搬家)")
+    @DisplayName("佔比低的「碰過之後歸零」→ 安靜(2026-09-10 s3/s100 誤報:一個 chunk 只清 2~7%)")
+    void lowFractionEmptyIsSilent() throws Exception {
+        long m0 = LazyContainerRuntime.massEmpty.sum();
+        // 同一個 chunk:MASS_EMPTY_MIN 個被清空,但另外有 20×那麼多的滿箱照常寫出 ⟹ 佔比 <5%
+        int emptied = LazyContainerRuntime.MASS_EMPTY_MIN;
+        for (int n = 0; n < emptied; n++) {
+            EnsureRaceTest.TestChest be = loaded(items(3));
+            NonNullList<ItemStack> list = be.getItems();
+            for (int i = 0; i < list.size(); i++) {
+                list.set(i, ItemStack.EMPTY);
+            }
+            save(be);
+        }
+        for (int n = 0; n < emptied * 20; n++) {
+            EnsureRaceTest.TestChest be = loaded(items(3));
+            be.getItems();                              // 物化、保持有貨
+            save(be);                                   // 照常寫出 ⟹ 進分母
+        }
+        Thread.sleep(2100);
+        java.lang.reflect.Method sweep = LazyContainerRuntime.class.getDeclaredMethod("sweepMassEmpty");
+        sweep.setAccessible(true);
+        sweep.invoke(null);
+        assertEquals(0, LazyContainerRuntime.massEmpty.sum() - m0, "只清了個位數 % 不得報警(那是玩家搬家)");
+    }
+
+    @Test
+    @DisplayName("絕對數沒達門檻 → 安靜")
     void fewEmptiedAfterAccessIsSilent() throws Exception {
         long m0 = LazyContainerRuntime.massEmpty.sum();
         for (int n = 0; n < LazyContainerRuntime.MASS_EMPTY_MIN - 1; n++) {

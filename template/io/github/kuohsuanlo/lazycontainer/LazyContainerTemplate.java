@@ -379,19 +379,28 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
      * <p>呼叫端持 monitor。</p>
      */
     private void lazycontainer$noteEmptiedAfterAccess(NonNullList<ItemStack> items) {
-        byte[] rawBytes = this.lazycontainer$raw;
-        if (!this.lazycontainer$loadedNonEmpty || !this.lazycontainer$accessed || rawBytes == null
-                || this.lazycontainer$keptSince == 0L || this.lazycontainer$rawOk == 2) {
-            return;
+        if (!this.lazycontainer$loadedNonEmpty) {
+            return;                                     // 載入時本來就空 ⟹ 不進佔比的分子也不進分母
         }
+        byte[] rawBytes = this.lazycontainer$raw;
+        boolean empty = true;
         for (int i = 0; i < items.size(); i++) {
             if (!items.get(i).isEmpty()) {
-                return;
+                empty = false;
+                break;
             }
         }
+        String chunkKey = this.lazycontainer$chunkKeyForLog();
+        if (!empty) {
+            LazyContainerRuntime.noteStocked(chunkKey);  // 原本有貨、這次照常寫出內容 ⟹ 當分母
+            return;
+        }
+        if (!this.lazycontainer$accessed || rawBytes == null
+                || this.lazycontainer$keptSince == 0L || this.lazycontainer$rawOk == 2) {
+            return;                                     // 沒被碰過的空由守門管;raw 不在的無法落檔
+        }
         BlockPos p = this.getBlockPos();
-        LazyContainerRuntime.onEmptiedAfterAccess(this.lazycontainer$chunkKeyForLog(),
-                p.getX(), p.getY(), p.getZ(), rawBytes);
+        LazyContainerRuntime.onEmptiedAfterAccess(chunkKey, p.getX(), p.getY(), p.getZ(), rawBytes);
     }
 
     /** 「維度 + chunk」字串,同一個 chunk 的容器要彙總到一起。 */

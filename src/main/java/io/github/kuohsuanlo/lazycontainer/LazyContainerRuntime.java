@@ -400,7 +400,13 @@ public final class LazyContainerRuntime {
     // 這裡按「執行緒 + chunk」彙總:chunk 存檔在一條執行緒上連續處理同一個 chunk 的容器,
     // 換 chunk 或閒置超過 2 秒就結算。達門檻 ⟹ 全部原始 bytes 落成一個可還原的 NBT 檔 + 報警 + 降級。
 
-    public static final int MASS_EMPTY_MIN = Integer.getInteger("lazycontainer.massEmpty.min", 8);
+    // 絕對數只是地板(小 chunk 別因為幾個就亮);真正的判準是**佔比**:一個 chunk 裡原本有東西的容器,
+    // 有超過一半在同一次存檔裡同時被清空,才算大面積。s3 事故 = 一個 chunk 154/~200 = 77%;
+    // 正常玩家/漏斗搬幾箱 = 個位數 %(2026-09-10 實測 s3/s100 誤報都在 2~7%)。
+    public static final int MASS_EMPTY_MIN = Integer.getInteger("lazycontainer.massEmpty.min", 40);
+    /** 分子(被清空)/ 分母(這個 chunk 這次存檔裡原本有東西的容器)要 ≥ 這個比例。 */
+    public static final double MASS_EMPTY_FRACTION =
+            Double.parseDouble(System.getProperty("lazycontainer.massEmpty.fraction", "0.5"));
     public static final java.util.concurrent.atomic.LongAdder massEmpty = new java.util.concurrent.atomic.LongAdder();
     public static final java.util.concurrent.atomic.LongAdder massEmptyContainers = new java.util.concurrent.atomic.LongAdder();
     private static final java.util.concurrent.atomic.AtomicInteger massEmptyDumpN = new java.util.concurrent.atomic.AtomicInteger();
@@ -408,6 +414,7 @@ public final class LazyContainerRuntime {
     private static final class MassEmpty {
         String chunkKey;
         long lastSeen;
+        int stocked;                                    // 這個 chunk 這次存檔裡「原本有東西且照常寫出內容」的容器數(分母的另一半)
         final java.util.ArrayList<int[]> pos = new java.util.ArrayList<int[]>();
         final java.util.ArrayList<byte[]> raw = new java.util.ArrayList<byte[]>();
     }
@@ -415,24 +422,37 @@ public final class LazyContainerRuntime {
     private static final java.util.concurrent.ConcurrentHashMap<Thread, MassEmpty> MASS =
             new java.util.concurrent.ConcurrentHashMap<Thread, MassEmpty>();
 
-    /** template 在存檔路徑上呼叫(持容器 monitor):這個容器載入時有東西、有人碰過、現在要寫空的。 */
-    public static void onEmptiedAfterAccess(String chunkKey, int x, int y, int z, byte[] raw) {
-        if (raw == null) {
-            return;
-        }
+    private static MassEmpty massBatch(String chunkKey) {
         Thread t = Thread.currentThread();
         MassEmpty me = MASS.get(t);
         if (me == null) {
             me = new MassEmpty();
             MASS.put(t, me);
         }
+        long now = System.nanoTime();
+        if (me.chunkKey != null && (!me.chunkKey.equals(chunkKey) || now - me.lastSeen > 2_000_000_000L)) {
+            finishMassEmpty(me);
+        }
+        me.chunkKey = chunkKey;
+        me.lastSeen = now;
+        return me;
+    }
+
+    /** template 在存檔路徑上呼叫:這個容器載入時有東西、照常寫出了內容 ⟹ 當佔比的分母。 */
+    public static void noteStocked(String chunkKey) {
+        MassEmpty me = massBatch(chunkKey);
         synchronized (me) {
-            long now = System.nanoTime();
-            if (me.chunkKey != null && (!me.chunkKey.equals(chunkKey) || now - me.lastSeen > 2_000_000_000L)) {
-                finishMassEmpty(me);
-            }
-            me.chunkKey = chunkKey;
-            me.lastSeen = now;
+            me.stocked++;
+        }
+    }
+
+    /** template 在存檔路徑上呼叫(持容器 monitor):這個容器載入時有東西、有人碰過、現在要寫空的。 */
+    public static void onEmptiedAfterAccess(String chunkKey, int x, int y, int z, byte[] raw) {
+        if (raw == null) {
+            return;
+        }
+        MassEmpty me = massBatch(chunkKey);
+        synchronized (me) {
             me.pos.add(new int[] {x, y, z});
             me.raw.add(raw);
         }
@@ -454,17 +474,21 @@ public final class LazyContainerRuntime {
     private static void finishMassEmpty(MassEmpty me) {
         int n = me.pos.size();
         String key = me.chunkKey;
-        if (n >= MASS_EMPTY_MIN) {
+        int denom = n + me.stocked;                     // 這個 chunk 這次原本有東西的容器總數
+        double frac = denom > 0 ? (double) n / denom : 0.0;
+        if (n >= MASS_EMPTY_MIN && frac >= MASS_EMPTY_FRACTION) {
             massEmpty.increment();
             massEmptyContainers.add(n);
             java.io.File f = dumpMassEmpty(key, me.pos, me.raw);
             System.err.println("[LazyContainer] MASS EMPTY " + key + " —— 同一次存檔裡 " + n
-                    + " 個容器「載入時有東西、有人碰過、現在寫成空的」。單一容器分不出玩家拿光還是程式清空,"
+                    + " 個容器「載入時有東西、有人碰過、現在寫成空的」(佔這個 chunk 原本有貨容器的 "
+                    + Math.round(frac * 100) + "%,共 " + denom + " 個)。單一容器分不出玩家拿光還是程式清空,"
                     + "所以沒有自動寫回;全部原始內容已落檔:" + (f == null ? "(落檔失敗)" : f.getAbsolutePath())
                     + " 。請立刻回報並保留這一行。");
-            tripSafeMode(key + " 大面積歸零(" + n + " 個容器)");
+            tripSafeMode(key + " 大面積歸零(" + n + "/" + denom + " 個容器," + Math.round(frac * 100) + "%)");
         }
         me.chunkKey = null;
+        me.stocked = 0;
         me.pos.clear();
         me.raw.clear();
     }
