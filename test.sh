@@ -52,7 +52,7 @@ javac -proc:none -nowarn -cp "${NMSCP}:${JUNIT}" -d "$OUT" \
 
 echo "== 2. 執行差分測試 + 併發測試 + 歸因分類測試 =="
 # --sun-misc-unsafe-memory-access=allow:NmsTestSupport 用 Unsafe.allocateInstance 配假 server(JDK 25 會印警告)
-java --sun-misc-unsafe-memory-access=allow -jar "$JUNIT" execute \
+java --sun-misc-unsafe-memory-access=allow -Dlazycontainer.massEmpty=true -jar "$JUNIT" execute \
   --class-path "${OUT}:${NMSCP}" \
   --select-class io.github.kuohsuanlo.lazycontainer.SummaryDifferentialTest \
   --select-class io.github.kuohsuanlo.lazycontainer.EnsureRaceTest \

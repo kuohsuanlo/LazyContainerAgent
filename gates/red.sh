@@ -8,7 +8,7 @@
 #   wipeKeepRaw      清單被清空,但 raw 還在   ⟹ 存檔本來就原樣寫回,磁碟零流失(這是主要防線)
 #   wipe             物化過、沒人碰過就被清空   ⟹ 必須亮 SILENT WIPE + SAFE MODE,而且用留著的 raw 寫回 ⟹ 磁碟零流失
 #   wipe-noguard     同上但關掉守門(對照組)   ⟹ 必須「沒有警報」而且磁碟真的掉東西
-#   wipeAccessed     有人碰過之後才被清空       ⟹ 不得自動寫回(那可能是玩家拿光的),整個 chunk 大面積歸零時
+#   wipeAccessed     有人碰過之後才被清空(需 -Dlazycontainer.massEmpty=true,預設關)⟹ 不得自動寫回,整個 chunk 大面積歸零時
 #                                                 必須 MASS EMPTY 落檔 + 報警 + SAFE MODE;磁碟會掉,但救援檔裡一個都不少
 #   corruptRaw       raw 被改壞一個 byte       ⟹ 核心自己的 NbtIo 解爆,必須亮 BAD RAW + SAFE MODE
 #   badWrite         編碼完之後 Items 被拔掉    ⟹ 記憶體完全正確、寫出去卻是壞的。寫入保真檢查必須抓到,
@@ -30,7 +30,7 @@ flags_of() {
     wipeKeepRaw)  echo "$a -Dlazycontainer.fault=wipeKeepRaw -Dlazycontainer.fault.every=$EVERY" ;;
     wipe)         echo "$a -Dlazycontainer.fault=wipe -Dlazycontainer.fault.every=$EVERY" ;;
     wipe-noguard) echo "$a -Dlazycontainer.fault=wipe -Dlazycontainer.fault.every=$EVERY -Dlazycontainer.guard=false" ;;
-    wipeAccessed) echo "$a -Dlazycontainer.fault=wipeAccessed -Dlazycontainer.fault.every=${LC_RED_EVERY_CHUNK:-10}" ;;   # 按 chunk 打:每 10 個 chunk 選一個全清
+    wipeAccessed) echo "$a -Dlazycontainer.fault=wipeAccessed -Dlazycontainer.fault.every=${LC_RED_EVERY_CHUNK:-10} -Dlazycontainer.massEmpty=true" ;;   # 按 chunk 打 + 開大面積偵測(預設關,只查案用)
     corruptRaw)   echo "$a -Dlazycontainer.fault=corruptRaw -Dlazycontainer.fault.every=$EVERY" ;;
     dropSideCar)  echo "$a -Dlazycontainer.fault=dropSideCar -Dlazycontainer.fault.every=$EVERY" ;;
     badWrite)     echo "$a -Dlazycontainer.fault=badWrite -Dlazycontainer.fault.every=$EVERY" ;;
