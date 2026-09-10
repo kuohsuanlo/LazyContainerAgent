@@ -124,7 +124,7 @@ PY2
 )
   # 磁碟上「達門檻的 chunk」共掉了幾個(門檻以下的 chunk 本來就不落檔——那是玩家搬家的份量)。
   # 用 Python 不用 awk:awk 的 substr/RSTART 是位元組偏移,中文字 3 bytes,算出來永遠是 0,斷言等於沒驗(實測踩到)。
-  expect=$(python3 - "$E/wipeAccessed.loss" "${LC_MASS_EMPTY_MIN:-8}" <<'PY3'
+  expect=$(python3 - "$E/wipeAccessed.loss" "${LC_MASS_EMPTY_MIN:-40}" <<'PY3'
 import sys, re
 m = int(sys.argv[2]); cur = None; over = 0
 for line in open(sys.argv[1], encoding='utf-8'):
