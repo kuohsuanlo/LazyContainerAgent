@@ -45,20 +45,14 @@ javac -proc:none -nowarn -cp "${NMSCP}:${JUNIT}" -d "$OUT" \
   tests/io/github/kuohsuanlo/lazycontainer/EnsureRaceTest.java \
   tests/io/github/kuohsuanlo/lazycontainer/AttributionClassifyTest.java \
   tests/io/github/kuohsuanlo/lazycontainer/ComponentPartialSemanticsTest.java \
-  tests/io/github/kuohsuanlo/lazycontainer/RawPassthroughFramingTest.java \
-  tests/io/github/kuohsuanlo/lazycontainer/PassthroughDeficitTest.java \
-  tests/io/github/kuohsuanlo/lazycontainer/SilentWipeGuardTest.java \
   src/main/java/io/github/kuohsuanlo/lazycontainer/LazyContainerRuntime.java
 
 echo "== 2. 執行差分測試 + 併發測試 + 歸因分類測試 =="
 # --sun-misc-unsafe-memory-access=allow:NmsTestSupport 用 Unsafe.allocateInstance 配假 server(JDK 25 會印警告)
-java --sun-misc-unsafe-memory-access=allow -Dlazycontainer.massEmpty=true -jar "$JUNIT" execute \
+java --sun-misc-unsafe-memory-access=allow -jar "$JUNIT" execute \
   --class-path "${OUT}:${NMSCP}" \
   --select-class io.github.kuohsuanlo.lazycontainer.SummaryDifferentialTest \
   --select-class io.github.kuohsuanlo.lazycontainer.EnsureRaceTest \
   --select-class io.github.kuohsuanlo.lazycontainer.AttributionClassifyTest \
   --select-class io.github.kuohsuanlo.lazycontainer.ComponentPartialSemanticsTest \
-  --select-class io.github.kuohsuanlo.lazycontainer.RawPassthroughFramingTest \
-  --select-class io.github.kuohsuanlo.lazycontainer.PassthroughDeficitTest \
-  --select-class io.github.kuohsuanlo.lazycontainer.SilentWipeGuardTest \
   --details=tree --disable-banner

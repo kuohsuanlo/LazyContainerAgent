@@ -95,11 +95,7 @@ class EnsureRaceTest {
 
         @Override
         protected NonNullList<ItemStack> getItems() {
-            // = GUARD_ENSURE(26.2-7):無條件標記 accessed(排除 ensure 自己的重入),再視 pending 物化
-            if (!this.lazycontainer$accessed && this.lazycontainer$ensuring != Thread.currentThread()) {
-                this.lazycontainer$accessed = true;
-            }
-            if (this.lazycontainer$pending) {
+            if (this.lazycontainer$pending) {          // = GUARD_ENSURE
                 this.lazycontainer$ensure();
             }
             Runnable h = hook.getAndSet(null);
@@ -112,11 +108,6 @@ class EnsureRaceTest {
         /** 不經 guard 的清單:模擬「guard 看到 pending=false 之後直接回傳欄位」那一步。 */
         NonNullList<ItemStack> rawItems() {
             return items;
-        }
-
-        @Override
-        protected NonNullList<ItemStack> getItems0ForTest() {
-            return items;                              // 寫入保真測試要的是「不經 guard 的當下清單」
         }
 
         /**

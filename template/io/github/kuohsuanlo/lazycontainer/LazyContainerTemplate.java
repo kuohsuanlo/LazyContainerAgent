@@ -101,18 +101,8 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
      * <p>為什麼不能連 bytes 都省(直接引用磁碟 buffer):agent 掛在 ValueInput 層,拿到的已是解析完的樹,
      * 上游的壓縮串流早就不在了;而 {@code Tag} 是 sealed interface,也做不出 byte-backed 的假 Tag
      * 讓存檔直接吐 bytes——那兩條都是方案 B(改核心)的領域。</p>
-     * <p><b>26.2-7 起物化之後不再立刻作廢</b>,而是留到「物化後的第一次存檔」、「區塊卸載」或
-     * 「超過 {@code -Dlazycontainer.keepRaw.ms}(預設 10 分鐘)」為止(見 {@link #lazycontainer$keptSince})。
-     * 留著的用途只有一個:存檔守門攔到靜默清空時,拿它把原始內容寫回去(或落檔),不然只能報警。
-     * 三種情況都持鎖釋放;資料掛在容器物件上,容器沒了它就跟著沒了,不會有孤兒。</p>
      */
     public byte[] lazycontainer$raw;
-
-    /**
-     * raw 從什麼時候開始是「物化後留著」的({@code System.nanoTime()});0 = 沒有在留。
-     * 只在持 monitor 時寫。統計執行緒每輪掃一次登記過的容器,超過上限就持鎖釋放。
-     */
-    public long lazycontainer$keptSince;
 
     // ── 摘要(ensure 快取):讓漏斗的滿/空檢查不必觸發整箱解碼 ──
     // 不變式:摘要只能在「答案可證明與 vanilla 解碼後行為完全一致」時給出定論;
@@ -128,30 +118,6 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
 
     /** 滿判定三態:1=證明全滿(每格 count>=maxStackSize)、0=證明不滿、-1=無法證明。 */
     public int lazycontainer$sumFullTri;
-
-    /**
-     * raw 的「存檔直寫」判定快取:0=未判、1=走訪通過(可直寫)、2=走訪拒絕或連 vanilla 都解不開(永遠走 vanilla encode)。
-     * <p>raw 一經 encode 就不再變動(只會整個換掉或設 null),所以走訪是 <b>每個 raw 一次</b>的事;放進欄位是因為
-     * autosave 會在同一份 raw 上反覆呼叫存檔,而走訪是 O(raw.length)——材料站型 26 MB 的容器若每次 autosave 重掃,
-     * 等於在 tick 執行緒上種一個新的(較小的)尖峰,正是 #261 要消滅的那類東西。</p>
-     * <p>值 2 是<b>終局</b>:代表這份 bytes 連 vanilla 讀取端都拒收,絕不可寫進 chunk(會讓整個 chunk 讀不回來)。
-     * 該容器之後一律物化後走 vanilla encode。</p>
-     */
-    public int lazycontainer$rawOk;
-
-    /**
-     * 載入時這個容器的 raw 是否「非空」(至少有一筆 entry)。
-     * <p>用途只有一個:存檔守門(見 {@link #lazycontainer$guardEmptyWrite}) —— 「載入時有東西」是判斷
-     * 「這次寫出空的是不是異常」的前提。與摘要無關,摘要可能整份棄答,這個旗標永遠可信。</p>
-     */
-    public boolean lazycontainer$loadedNonEmpty;
-
-    /**
-     * 這個容器有沒有被<b>外部</b>存取過(玩家開箱、漏斗抽、比較器讀、外掛 API、指令)。
-     * <p>由 leaf 的 guard 入口設,<b>不</b>由存檔路徑自己的 ensure 設。沒被存取過的容器,它的內容
-     * 不可能被合法拿走 —— 拿東西一定要先存取它。</p>
-     */
-    public volatile boolean lazycontainer$accessed;
 
     /** 永不被呼叫;僅為通過編譯。splice 時不會嫁接 {@code <init>}。 */
     protected LazyContainerTemplate(BlockEntityType<?> type, BlockPos pos, BlockState st) {
@@ -174,11 +140,6 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
      */
     public synchronized void lazycontainer$load(ValueInput input, NonNullList<ItemStack> items) {
         this.lazycontainer$sumState = 0;    // 換了新 raw,舊摘要作廢
-        this.lazycontainer$rawOk = 0;       // 換了新 raw,舊的直寫判定作廢
-        // 存檔守門的兩個前提每次載入都要歸零:eager 退路(非 TagValueInput、encode 失敗)也會走到這裡,
-        // 若沿用上一輪的 loadedNonEmpty=true / accessed=false,下次存檔會誤判成靜默清空。
-        this.lazycontainer$loadedNonEmpty = false;
-        this.lazycontainer$accessed = false;
         if (input instanceof TagValueInput) {
             Tag itemsTag = ((TagValueInput) input).input.get("Items");
             byte[] encoded;
@@ -191,9 +152,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                 LazyContainerRuntime.onEagerLoad();
                 return;
             }
-            encoded = LazyContainerRuntime.faultCorruptRaw(encoded);   // 紅綠驗證台:預設是恆等函式
             this.lazycontainer$raw = encoded;
-            this.lazycontainer$loadedNonEmpty = encoded != null && !LazyContainerRuntime.rawListIsEmpty(encoded);
             // 摘要 eager 建置:樹此刻還在(免 parse);查詢端不再 lazy build(sumState==0 一律當「不知道」)
             if (LazyContainerRuntime.summary()) {
                 long packed;
@@ -225,23 +184,6 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         LazyContainerRuntime.onEagerLoad();
     }
 
-    /**
-     * log 用座標:「minecraft:&lt;dim&gt; chunk (cx, cz) block x, y, z」。
-     * 格式刻意對齊面板 chunkguard.py 的 DIM_RE / CH_RE1,讓「BAD RAW」能像核心的 chunk data will be lost 一樣被建案。
-     */
-    private String lazycontainer$posForLog() {
-        BlockPos p = this.getBlockPos();
-        String dim = "world=?";
-        try {
-            if (this.level != null) {
-                dim = String.valueOf(this.level.dimension().identifier());
-            }
-        } catch (Throwable t) {
-            // 觀測失敗不影響主流程
-        }
-        return dim + " chunk (" + (p.getX() >> 4) + ", " + (p.getZ() >> 4) + ") block " + p.toShortString();
-    }
-
     /** Tag → NBT 二進位({@code NbtIo.writeAnyTag} 框架);null 進 null 出。 */
     public static byte[] lazycontainer$encodeRaw(Tag tag) throws java.io.IOException {
         if (tag == null) {
@@ -260,55 +202,6 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         }
         DataInputStream dis = new DataInputStream(new ByteArrayInputStream(bytes));
         return NbtIo.readAnyTag(dis, NbtAccounter.unlimitedHeap());
-    }
-
-    /**
-     * passthrough shadow(26.2-4):<b>真路徑</b>探針。磁碟寫的仍是解析出來的樹(=26.2-2,安全),
-     * 這裡另外做一次「真模式會做的事」並把結果讀回來對帳:
-     * <ol>
-     *   <li>{@code probe = out.copy()} —— 此刻 out 只有 BE 的小欄位(id/x/y/z/Lock/LootTable…),Items 還沒放進去,
-     *       copy 很便宜;{@code copy()} 本身也是被改寫過的方法,順帶驗它有沒有把 raw 欄位帶過去。</li>
-     *   <li>{@code attachRaw(probe, "Items", rawBytes)} —— 掛上 raw(失敗代表真模式也不會啟用,計 unavailable)。</li>
-     *   <li>{@code NbtIo.write(probe, …)} —— <b>真的執行被 ASM 改寫的 CompoundTag.write</b>(注入 prologue + 原本迴圈 + END)。
-     *       這是與「在測試裡重演 prologue」的關鍵差別:注入位置錯、prologue 與 map 內同名 key 重複、
-     *       copy() 沒帶欄位等只有真模式才會發生的錯誤,只有走這條才看得到。</li>
-     *   <li>用 vanilla 讀回,與 {@code expected = out.copy() + put("Items", 解析樹)} 比對,並要求串流剛好讀完。</li>
-     * </ol>
-     * <p>承重的是「不拋例外 + 讀回的 key 集合正確 + 串流剛好讀完」;{@code equals} 是附帶的廉價斷言。
-     * 讀回用<b>有界</b> accounter:框架若錯位,壞掉的長度欄位可能要求配置數 GB,無界會在 tick 執行緒上 OOM。</p>
-     * 純觀測:不影響呼叫端寫出的樹。回傳 ok 供測試斷言。
-     */
-    public static boolean lazycontainer$passthroughShadowCheck(CompoundTag out, byte[] rawBytes, Tag parsed, String pos) {
-        if (rawBytes.length > LazyContainerRuntime.PT_SHADOW_MAX_BYTES) {
-            LazyContainerRuntime.onPassthroughShadowSkipped(pos, rawBytes.length);
-            return true;
-        }
-        try {
-            CompoundTag probe = out.copy();
-            probe.remove("Items");
-            if (!LazyContainerRuntime.attachRaw(probe, "Items", rawBytes)) {
-                LazyContainerRuntime.onPassthroughShadowUnavailable();
-                return true;              // CompoundTag 未被改寫 ⟹ 真模式同樣不會啟用,不是 mismatch
-            }
-            ByteArrayOutputStream bos = new ByteArrayOutputStream(rawBytes.length + 256);
-            DataOutputStream dos = new DataOutputStream(bos);
-            NbtIo.write(probe, dos);      // ← 真的走被改寫的 write
-            byte[] emitted = bos.toByteArray();
-            DataInputStream dis = new DataInputStream(new ByteArrayInputStream(emitted));
-            CompoundTag back = NbtIo.read(dis, NbtAccounter.create(LazyContainerRuntime.PT_SHADOW_READ_BUDGET));
-            int leftover = dis.available();
-            CompoundTag expected = out.copy();
-            expected.put("Items", parsed);
-            boolean sameKeys = back.size() == expected.size() && back.keySet().equals(expected.keySet());
-            boolean ok = sameKeys && leftover == 0 && back.equals(expected);
-            String detail = ok ? "" : ("backKeys=" + back.keySet() + " expectedKeys=" + expected.keySet()
-                    + " leftover=" + leftover + " equal=" + back.equals(expected) + " rawLen=" + rawBytes.length);
-            LazyContainerRuntime.onPassthroughShadow(ok, pos, detail);
-            return ok;
-        } catch (Throwable t) {
-            LazyContainerRuntime.onPassthroughShadow(false, pos, "probe threw " + t);
-            return false;
-        }
     }
 
     /**
@@ -343,80 +236,6 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
      * </ul>
      * <p>成本:已物化容器的熱路徑只有 guard 的一個 volatile 讀,不進本方法;本方法每容器每次載入至多執行一次。</p>
      */
-    /**
-     * 物化後留著的 raw 的釋放點之一:存檔完成。物化後的第一次存檔就是「沒報錯就釋放」——
-     * 從這一刻起磁碟上已經是物化後的內容,載入時的那份 bytes 不再是任何東西的基準。
-     * <p>呼叫端持 monitor(兩個 save 入口皆 synchronized)。pending 時不動 raw(那是直寫要用的)。</p>
-     */
-    private void lazycontainer$releaseKeptRaw() {
-        if (!this.lazycontainer$pending && this.lazycontainer$keptSince != 0L) {
-            this.lazycontainer$raw = null;
-            this.lazycontainer$keptSince = 0L;
-        }
-    }
-
-    /**
-     * 釋放點之二:到期。統計執行緒每輪呼叫(反射),超過 {@code -Dlazycontainer.keepRaw.ms} 就放掉。
-     * 這條是給「物化了但 chunk 一直沒存檔」的情況兜底(唯讀的物化不會弄髒 chunk,Paper 只存髒 chunk)。
-     * @return true = 已經沒有在留(可以從登記名單移除)
-     */
-    public synchronized boolean lazycontainer$releaseIfExpired(long now, long keepNanos) {
-        if (this.lazycontainer$keptSince == 0L || this.lazycontainer$pending) {
-            return true;
-        }
-        if (now - this.lazycontainer$keptSince > keepNanos) {
-            this.lazycontainer$raw = null;
-            this.lazycontainer$keptSince = 0L;
-            return true;
-        }
-        return false;
-    }
-
-    /**
-     * 「有人碰過之後才變空」的情況:每個容器自己分不出是玩家拿光還是程式清空,所以**不寫回**
-     * (寫回會把玩家已經拿走的東西再變出來一份),改成交給 runtime 以 chunk 為單位彙總——
-     * 同一次存檔裡整個 chunk 大面積歸零,就把所有原始 bytes 落檔並報警。資料不丟,還原是複製一個檔案。
-     * <p>呼叫端持 monitor。</p>
-     */
-    private void lazycontainer$noteEmptiedAfterAccess(NonNullList<ItemStack> items) {
-        if (!this.lazycontainer$loadedNonEmpty) {
-            return;                                     // 載入時本來就空 ⟹ 不進佔比的分子也不進分母
-        }
-        byte[] rawBytes = this.lazycontainer$raw;
-        boolean empty = true;
-        for (int i = 0; i < items.size(); i++) {
-            if (!items.get(i).isEmpty()) {
-                empty = false;
-                break;
-            }
-        }
-        String chunkKey = this.lazycontainer$chunkKeyForLog();
-        if (!empty) {
-            LazyContainerRuntime.noteStocked(chunkKey);  // 原本有貨、這次照常寫出內容 ⟹ 當分母
-            return;
-        }
-        if (!this.lazycontainer$accessed || rawBytes == null
-                || this.lazycontainer$keptSince == 0L || this.lazycontainer$rawOk == 2) {
-            return;                                     // 沒被碰過的空由守門管;raw 不在的無法落檔
-        }
-        BlockPos p = this.getBlockPos();
-        LazyContainerRuntime.onEmptiedAfterAccess(chunkKey, p.getX(), p.getY(), p.getZ(), rawBytes);
-    }
-
-    /** 「維度 + chunk」字串,同一個 chunk 的容器要彙總到一起。 */
-    private String lazycontainer$chunkKeyForLog() {
-        BlockPos p = this.getBlockPos();
-        String dim = "world=?";
-        try {
-            if (this.level != null) {
-                dim = String.valueOf(this.level.dimension().identifier());
-            }
-        } catch (Throwable t) {
-            // 觀測失敗不影響主流程
-        }
-        return dim + " chunk (" + (p.getX() >> 4) + ", " + (p.getZ() >> 4) + ")";
-    }
-
     public void lazycontainer$ensure() {
         if (!this.lazycontainer$pending) {
             return;                                     // volatile 讀:false ⟹ 清單已完整(見上證明)
@@ -448,28 +267,17 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                     }
                     Tag raw;
                     try {
-                        raw = lazycontainer$decodeRaw(rawBytes);    // bytes → Tag(自家 encode 的往返)
-                    } catch (Throwable t) {
-                        // decode 自家 bytes 失敗(現實上不可達:raw 是我們自己從一棵已解析的樹 encode 出來的)。
-                        // 26.2 的 NbtIo 對壞 bytes 丟 RuntimeException 而非 IOException;若讓它傳出去,
-                        // 每次漏斗/玩家碰這個容器都會炸一次(getItems 在 tick 熱路徑),形同永久炸彈。
-                        // 改為:落檔保存原始 bytes + 印座標一次 + 標記終局(rawOk=2)+ 作廢 raw,
-                        // 容器維持目前清單(空),之後一律走 vanilla 路徑。資料靠備份/工具救,不再擴大災情。
-                        this.lazycontainer$rawOk = 2;
-                        LazyContainerRuntime.onBadRaw(this.lazycontainer$posForLog(), rawBytes, "ensure decode threw " + t);
-                        this.lazycontainer$raw = null;
-                        this.lazycontainer$pending = false;
-                        return;
+                        raw = lazycontainer$decodeRaw(rawBytes);    // bytes → Tag(自家 encode 的往返,失敗即拋)
+                    } catch (java.io.IOException io) {
+                        // decode 自家 bytes 失敗(現實上不可達):pending 未翻、raw 仍在,下次重試,絕不靜默丟失
+                        throw new IllegalStateException("lazycontainer raw decode failed", io);
                     }
                     CompoundTag tmp = new CompoundTag();
                     tmp.put("Items", raw);
                     ValueInput vi = TagValueInput.createGlobal(ProblemReporter.DISCARDING, tmp);
                     // 依 slot set,冪等 → 中途拋出時 pending 仍 true、raw 仍在,下次存取重試
                     ContainerHelper.loadAllItems(vi, this.getItems());
-                    // 成功物化。raw 不作廢,留到第一次存檔/卸載/到期(存檔守門要靠它把東西寫回去)。
-                    // 「不作廢」是安全的:trySaveRaw 只在 pending 時用 raw,而 pending 在下面就翻成 false。
-                    this.lazycontainer$keptSince = System.nanoTime();
-                    LazyContainerRuntime.trackKept(this);
+                    this.lazycontainer$raw = null;                      // 僅「成功物化後」才作廢 raw
                     LazyContainerRuntime.onEnsure();
                     if (attrStack != null) {
                         try {
@@ -504,9 +312,6 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
     public synchronized void lazycontainer$clear() {
         this.lazycontainer$pending = false;
         this.lazycontainer$raw = null;
-        // setItems(整批換清單)也是一次正當的外部存取 ⟹ 「沒人碰過」的前提就此作廢,存檔守門不再介入。
-        // loadAdditional/loadFromTag 走的也是這條,但緊接著的 lazycontainer$load 會把旗標重新歸零。
-        this.lazycontainer$accessed = true;
     }
 
     // ── 存檔 redirect 目標(取代 leaf saveAdditional 內的 ContainerHelper.saveAllItems 呼叫)──
@@ -518,169 +323,20 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
     // 舊版在鎖外讀 pending 後再讀 raw,ensure 中途存檔會把「半填清單」編碼寫盤(autosave 對純讀不弄髒的 chunk
     // 之後不再重寫 ⟹ 磁碟永久殘缺)。存檔本來就不是每 tick 熱路徑,多一次無競爭 monitor 進出可忽略。
 
-    /**
-     * 紅綠驗證台專用:把一個「載入時有東西、沒人碰過」的容器,在沒有經過任何存取點的情況下清空。
-     * 這正是 2026-09-08 s3 事故在磁碟上留下的形狀(物化過、清單空、其餘 NBT 一字不差)。
-     * 預設 {@code -Dlazycontainer.fault} 是空的,這個方法直接返回。
-     */
-    private void lazycontainer$maybeInjectWipe(NonNullList<ItemStack> items) {
-        if (!this.lazycontainer$loadedNonEmpty || this.lazycontainer$accessed) {
-            return;
-        }
-        boolean materialize = LazyContainerRuntime.faultWipe();
-        boolean keepRaw = !materialize && LazyContainerRuntime.faultWipeKeepRaw();
-        boolean accessed = !materialize && !keepRaw && LazyContainerRuntime.faultWipeAccessed(this.lazycontainer$chunkKeyForLog());
-        if (!materialize && !keepRaw && !accessed) {
-            return;
-        }
-        if (materialize || accessed) {
-            this.lazycontainer$ensure();                // 物化:raw 現在會留著(26.2-7),守門才有東西可以寫回
-        }
-        if (accessed) {
-            this.lazycontainer$accessed = true;         // 模擬「有人碰過」——這正是 s3 事故的形狀,守門不得自動寫回
-        }
-        for (int i = 0; i < items.size(); i++) {
-            items.set(i, ItemStack.EMPTY);
-        }
-        System.err.println("[LazyContainer] FAULT " + (materialize ? "wipe" : (accessed ? "wipeAccessed" : "wipeKeepRaw")) + ": "
-                + this.lazycontainer$posForLog() + " 的清單已被清空");
-    }
-
-    /**
-     * <b>寫入保真檢查</b>(2026-09-09,服主提案)。
-     *
-     * <p>真相來源是<b>當下記憶體裡那份清單</b>,不是載入時那份。玩家拿光,記憶體就是空的,那空的也是
-     * 正確答案,照樣寫空的回去。所以這裡不分「碰過/沒碰過」,也沒有把玩家拿走的東西變回來的問題——
-     * 唯一要問的是:<b>寫出去的東西,跟記憶體現在說的一不一樣?</b></p>
-     *
-     * <p>少了就是寫壞了(寫空、寫少、寫到別的地方去),當場把側車拆掉、用記憶體那份重寫一次,並且報警。
-     * 三種輸出來源都算得出筆數而且都不解析:側車讀 ListTag 表頭、Items 樹讀 size、什麼都沒有算 0。</p>
-     *
-     * <p><b>還沒物化的容器(pending)記憶體清單本來就是空的</b>,那不是寫壞——它的內容在 raw 裡,
-     * 而 raw 的筆數只會 ≥ 0,所以「寫出去的 ≥ 記憶體的」恆成立,不會誤報。</p>
-     *
-     * <p>呼叫端持 monitor,所以這段期間 items 不會被別人改。成本:一趟 ≤27 格的掃描 + 一個 size 讀取。</p>
-     */
-    private void lazycontainer$verifyWrite(ValueOutput output, NonNullList<ItemStack> items) {
-        if (!(output instanceof TagValueOutput)) {
-            return;
-        }
-        // 「記憶體現在說有幾筆」:還沒物化的容器,內容在 raw 裡(清單本來就是空的,那不是寫壞);
-        // 已物化的容器,內容就是清單本身。兩種都算得出來,而且都不解析。
-        byte[] rawBytes = this.lazycontainer$raw;
-        boolean fromRaw = this.lazycontainer$pending && rawBytes != null;
-        int mem;
-        if (fromRaw) {
-            mem = LazyContainerRuntime.rawListSize(rawBytes);
-        } else {
-            mem = 0;
-            for (int i = 0; i < items.size(); i++) {
-                if (!items.get(i).isEmpty()) {
-                    mem++;
-                }
-            }
-        }
-        if (mem <= 0) {
-            return;                                     // 記憶體說空的 ⟹ 寫什麼都不算少
-        }
-        CompoundTag out = ((TagValueOutput) output).buildResult();
-        int written = LazyContainerRuntime.writtenItemCount(out);
-        if (written >= mem) {
-            return;                                     // 沒寫少 ⟹ 沒寫壞
-        }
-        // 寫壞了。把側車拆掉(補寫是寫一棵真的樹),用「記憶體現在說的那份」重寫一次。
-        LazyContainerRuntime.detachRaw(out);
-        out.remove("Items");
-        if (fromRaw) {
-            try {
-                Tag revived = lazycontainer$decodeRaw(rawBytes);
-                if (revived instanceof ListTag) {
-                    out.put("Items", revived);
-                }
-            } catch (Throwable ignored) {
-                // 解不開就只剩報警
-            }
-        } else {
-            ContainerHelper.saveAllItems(output, items);
-        }
-        int after = LazyContainerRuntime.writtenItemCount(((TagValueOutput) output).buildResult());
-        LazyContainerRuntime.onBadWrite(this.lazycontainer$posForLog(), mem, written, after);
-    }
-
-    /**
-     * 只給單元測試用:走完整的存檔路徑,但在編碼完之後把 Items 從輸出樹上拔掉,
-     * 模擬「記憶體完全正確、寫出去卻壞了」。正式執行期沒有任何呼叫點。
-     */
-    public synchronized void lazycontainer$saveBrokenForTest(ValueOutput output) {
-        NonNullList<ItemStack> items = this.getItems0ForTest();
-        if (!this.lazycontainer$trySaveRaw(output, true)) {
-            ContainerHelper.saveAllItems(output, items);
-        }
-        if (output instanceof TagValueOutput) {
-            CompoundTag out = ((TagValueOutput) output).buildResult();
-            LazyContainerRuntime.detachRaw(out);
-            out.remove("Items");
-        }
-        this.lazycontainer$verifyWrite(output, items);
-    }
-
-    /** 測試子類覆寫成「不經 guard 的清單」;正式的 leaf 不會用到。 */
-    protected NonNullList<ItemStack> getItems0ForTest() {
-        return this.getItems();
-    }
-
-    /** 紅綠驗證台:模擬「編碼完之後寫壞」——把 Items 從輸出樹上拔掉,記憶體完全正確。 */
-    private void lazycontainer$maybeInjectBadWrite(ValueOutput output) {
-        if (!(output instanceof TagValueOutput) || !LazyContainerRuntime.faultBadWrite()) {
-            return;
-        }
-        CompoundTag out = ((TagValueOutput) output).buildResult();
-        LazyContainerRuntime.detachRaw(out);
-        out.remove("Items");
-        System.err.println("[LazyContainer] FAULT badWrite: " + this.lazycontainer$posForLog()
-                + " 的 Items 已從輸出樹上拔掉(記憶體完全正確)");
-    }
-
     /** 取代 {@code ContainerHelper.saveAllItems(output, items)}(allowEmpty=true:chest/barrel)。 */
     public synchronized void lazycontainer$save(ValueOutput output, NonNullList<ItemStack> items) {
-        this.lazycontainer$maybeInjectWipe(items);
         if (this.lazycontainer$trySaveRaw(output, true)) {
-            this.lazycontainer$maybeInjectBadWrite(output);
-            this.lazycontainer$verifyWrite(output, items);
-            return;                                     // pending:原樣寫回,raw 留著(下次還要用)
+            return;
         }
-        try {
-            if (this.lazycontainer$guardEmptyWrite(output, items, true)) {
-                return;                                 // 沒人碰過卻要寫空的:已用留著的 raw 寫回 + 報警
-            }
-            this.lazycontainer$noteEmptiedAfterAccess(items);
-            ContainerHelper.saveAllItems(output, items);
-            this.lazycontainer$maybeInjectBadWrite(output);
-            this.lazycontainer$verifyWrite(output, items);
-        } finally {
-            this.lazycontainer$releaseKeptRaw();        // 物化後的第一次存檔 = 沒報錯就釋放
-        }
+        ContainerHelper.saveAllItems(output, items);
     }
 
     /** 取代 {@code ContainerHelper.saveAllItems(output, items, false)}(allowEmpty=false:shulker)。 */
     public synchronized void lazycontainer$saveNoEmpty(ValueOutput output, NonNullList<ItemStack> items) {
-        this.lazycontainer$maybeInjectWipe(items);
         if (this.lazycontainer$trySaveRaw(output, false)) {
-            this.lazycontainer$maybeInjectBadWrite(output);
-            this.lazycontainer$verifyWrite(output, items);
             return;
         }
-        try {
-            if (this.lazycontainer$guardEmptyWrite(output, items, false)) {
-                return;
-            }
-            this.lazycontainer$noteEmptiedAfterAccess(items);
-            ContainerHelper.saveAllItems(output, items, false);
-            this.lazycontainer$maybeInjectBadWrite(output);
-            this.lazycontainer$verifyWrite(output, items);
-        } finally {
-            this.lazycontainer$releaseKeptRaw();
-        }
+        ContainerHelper.saveAllItems(output, items, false);
     }
 
     /**
@@ -691,62 +347,6 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
      *
      * @param allowEmpty 對應 vanilla saveAllItems 的 allowEmpty(shadow 模式用以算出 byte-identical 的 eager 結果)
      */
-    /**
-     * 存檔守門:攔截「載入時有東西、從頭到尾沒人碰過、現在卻要寫出空的」這種寫入。
-     *
-     * <p><b>為什麼這個條件在正常運作下不可能成立</b>:沒被存取過的容器,agent 是把載入時收下的原始
-     * 位元組原樣寫回去的,不可能變空;而任何合法的取走(玩家、漏斗、比較器、外掛、指令)都必須先
-     * 存取它,那就會把 {@code accessed} 設起來。所以這個條件一旦成立,就代表內容在沒有人動它的情況下
-     * 消失了 —— 那是資料事故,不是玩法。</p>
-     *
-     * <p>攔到之後做兩件事:<b>先自救</b> —— raw 還在就把原始 bytes 寫回去(等同從沒發生);
-     * 然後<b>大聲報警</b>,格式與 BAD RAW 一致,面板的區塊救援偵測器抓得到。raw 已經不在時無法自救,
-     * 但仍然報警,並且<b>不寫出那個空清單</b>(讓呼叫端的 Items 欄位維持不存在,比寫成空更接近「不要動它」)。</p>
-     *
-     * @return true = 已經處理完(呼叫端不要再寫);false = 正常情況,照舊寫
-     */
-    private boolean lazycontainer$guardEmptyWrite(ValueOutput output, NonNullList<ItemStack> items, boolean allowEmpty) {
-        if (!LazyContainerRuntime.guard()) {
-            return false;                                   // 對照組:關掉守門,看「沒有這一關會怎樣」
-        }
-        if (!this.lazycontainer$loadedNonEmpty || this.lazycontainer$accessed) {
-            return false;                                   // 沒東西可掉,或有人正當地動過它
-        }
-        if (this.lazycontainer$rawOk == 2) {
-            return false;                                   // 壞 bytes 終局:onBadRaw 已經報過警並落檔,不重複報
-        }
-        for (int i = 0; i < items.size(); i++) {
-            if (!items.get(i).isEmpty()) {
-                return false;                               // 還有東西,不是全空
-            }
-        }
-        byte[] rawBytes = this.lazycontainer$raw;
-        String pos = this.lazycontainer$posForLog();
-        if (rawBytes != null && output instanceof TagValueOutput
-                && LazyContainerRuntime.rawIsListTag(rawBytes) && this.lazycontainer$rawOk != 2) {
-            CompoundTag out = ((TagValueOutput) output).buildResult();
-            out.remove("Items");
-            // 側車只有 chunk 存檔鏈會寫出;/data、getState、封包那些「讀」樹的呼叫者一定要拿到真的樹。
-            if (LazyContainerRuntime.passthrough() && LazyContainerRuntime.inChunkSave()
-                    && LazyContainerRuntime.attachRaw(out, "Items", rawBytes)) {
-                LazyContainerRuntime.onSilentWipe(pos, true);
-                return true;                                // 自救成功:寫回原始 bytes
-            }
-            try {
-                Tag revived = lazycontainer$decodeRaw(rawBytes);
-                if (revived instanceof ListTag && !((ListTag) revived).isEmpty()) {
-                    out.put("Items", revived);
-                    LazyContainerRuntime.onSilentWipe(pos, true);
-                    return true;                            // 自救成功:解回原始樹
-                }
-            } catch (Throwable ignored) {
-                // 解不開就走下面的「只報警」
-            }
-        }
-        LazyContainerRuntime.onSilentWipe(pos, false);
-        return true;                                        // 救不回來,但絕不主動寫出空的
-    }
-
     private boolean lazycontainer$trySaveRaw(ValueOutput output, boolean allowEmpty) {
         if (!this.lazycontainer$pending) {
             return false;
@@ -757,56 +357,11 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
             this.lazycontainer$ensure();
             return false;
         }
-        // ── raw passthrough(#261):chunk 存檔路徑不解析,bytes 直接掛到輸出 compound,序列化時原樣寫出 ──
-        // 只在 LevelChunk.getBlockEntityNbtForSaving 內(per-thread 旗標)且非 shadow;
-        // 其他呼叫者(/data、structure、getState、封包)會「讀」輸出樹,必須照舊給它們一棵真的樹。
-        // allowEmpty==false(shulker)遇空清單 vanilla 會 discard "Items",空與否不解析就能從 payload 判(見 Runtime)。
-        boolean ptShadow = false;
-        if (LazyContainerRuntime.passthrough() && LazyContainerRuntime.inChunkSave() && !LazyContainerRuntime.shadow()
-                && this.lazycontainer$rawOk != 2
-                && LazyContainerRuntime.rawIsListTag(rawBytes)
-                && (allowEmpty || !LazyContainerRuntime.rawListIsEmpty(rawBytes))) {
-            // 寫入前自檢(26.2-4):零配置走訪確認 raw 剛好是一個完整合法的 ListTag。
-            // 判定快取在 lazycontainer$rawOk:raw 不可變,所以每份 raw 只走訪一次(autosave 反覆存檔不重掃)。
-            if (this.lazycontainer$rawOk == 0) {
-                long t0 = System.nanoTime();
-                boolean wellFormed = LazyContainerRuntime.rawWellFormedList(rawBytes);
-                LazyContainerRuntime.onRawWalk(System.nanoTime() - t0);
-                this.lazycontainer$rawOk = wellFormed ? 1 : 2;
-                if (!wellFormed) {
-                    // 這份 bytes 連 vanilla 讀取端都會拒收 ⟹ 絕不寫進 chunk(會讓整個 chunk 讀不回來)。
-                    // 落檔 + 印座標,之後這個容器永遠走 vanilla encode。
-                    LazyContainerRuntime.onBadRaw(this.lazycontainer$posForLog(), rawBytes, "self-check rejected");
-                }
-            }
-            if (this.lazycontainer$rawOk == 1) {
-                if (LazyContainerRuntime.passthroughShadow()) {
-                    // passthrough shadow:磁碟照舊寫解析出的樹(下面那條路),直寫只做一次「真路徑」探針比對。
-                    ptShadow = true;
-                } else {
-                    CompoundTag pt = ((TagValueOutput) output).buildResult();
-                    pt.remove("Items");                                     // 防呆:同 key 不得同時存在於 map 與 raw
-                    if (LazyContainerRuntime.attachRaw(pt, "Items", rawBytes)) {
-                        LazyContainerRuntime.onRawSave();
-                        LazyContainerRuntime.onRawPassthrough();
-                        return true;
-                    }
-                    // attach 失敗(CompoundTag 未被改寫)⟹ 落回下面的解析路徑,行為與 26.2-2 完全相同
-                }
-            }
-        }
         Tag raw;
         try {
             raw = lazycontainer$decodeRaw(rawBytes);    // 每次存檔 parse 一棵**全新的私有樹**(取代舊版的 raw.copy())
-        } catch (Throwable t) {
-            // 26.2 的 NbtIo 對壞 bytes 丟的是 RuntimeException(NbtFormatException / NbtAccounterException /
-            // ReportedNbtException / IllegalArgumentException),不是 IOException——只接 IOException 會讓例外一路穿出
-            // getBlockEntityNbtForSaving → SerializableChunkData.copyOf,被 Moonrise 的 saveChunk 記成
-            // "Failed to save chunk" 後**整個 chunk 這輪不落盤**(其他容器的變更一起沒寫)。所以這裡接 Throwable。
-            this.lazycontainer$rawOk = 2;
-            LazyContainerRuntime.onBadRaw(this.lazycontainer$posForLog(), rawBytes, "decode threw " + t);
-            this.lazycontainer$raw = null;              // 讓 ensure 走 no-op 物化:清單維持現狀(空),不再重試解這份壞 bytes
-            this.lazycontainer$ensure();
+        } catch (java.io.IOException io) {
+            this.lazycontainer$ensure();                // 自家 bytes 解不開(不可達):退回正常 encode,不掉資料
             return false;
         }
         // 只在 raw 為「真正的 ListTag」時走快路徑;且 allowEmpty==false(shulker)遇空清單不可寫 raw
@@ -819,10 +374,6 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
             return false;
         }
         CompoundTag out = ((TagValueOutput) output).buildResult();
-        if (ptShadow) {
-            // passthrough shadow(純觀測):真路徑探針(copy→attachRaw→被改寫的 write→讀回對帳);磁碟寫的仍是下面的 raw 樹。
-            lazycontainer$passthroughShadowCheck(out, rawBytes, raw, String.valueOf(this.getBlockPos()));
-        }
         if (LazyContainerRuntime.shadow()) {
             // shadow 是「純觀測」模式:偵測並回報 raw 與 vanilla 重新編碼的差異,但**絕不改寫玩家資料**。
             // 設計原則(服主要求):寫回磁碟的必須是讀進來的那份原始資料,不做任何正規化(count:1 等明確
@@ -833,11 +384,6 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                 if (this.lazycontainer$sameItems(raw, eager)) {
                     LazyContainerRuntime.onBenignReorder(String.valueOf(this.getBlockPos()),
                             String.valueOf(raw), String.valueOf(eager));
-                } else if (this.lazycontainer$sameDecoded(raw, eager, allowEmpty)) {
-                    // 同一組物品、不同寫法(例如巢狀 container 的 entry 省略了預設的 count:1,
-                    // 原版重新編碼會補上)。判定用原版自己的解碼器逐格比,不是我們自己認定。
-                    LazyContainerRuntime.onBenignEncoding(String.valueOf(this.getBlockPos()),
-                            "raw " + (raw instanceof ListTag ? ((ListTag) raw).size() : -1) + " entries");
                 } else {
                     LazyContainerRuntime.onShadowMismatch();
                     LazyContainerRuntime.dumpMismatch(String.valueOf(this.getBlockPos()),
@@ -899,42 +445,6 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
             }
         }
         return true;
-    }
-
-    /**
-     * raw 與 eager 兩棵樹「解碼後」是否逐格相同。
-     *
-     * <p>用的是<b>原版自己的解碼器</b>({@code ContainerHelper.loadAllItems})與原版自己的相等判定
-     * ({@code ItemStack.matches},含 components),所以結論不是我們的主觀認定。相同 ⟹ 玩家看到的
-     * 東西一模一樣,兩棵樹的差別只是寫法(最典型:巢狀 container 的 entry 省略預設 count)。</p>
-     *
-     * <p>只在 shadow 模式、且已經測出「樹不相等」時才會呼叫,不在任何熱路徑上。</p>
-     */
-    private boolean lazycontainer$sameDecoded(Tag rawTag, Tag eagerTag, boolean allowEmpty) {
-        try {
-            int size = this.getContainerSize();
-            NonNullList<ItemStack> a = NonNullList.withSize(size, ItemStack.EMPTY);
-            NonNullList<ItemStack> b = NonNullList.withSize(size, ItemStack.EMPTY);
-            CompoundTag ra = new CompoundTag();
-            if (rawTag != null) {
-                ra.put("Items", rawTag);
-            }
-            CompoundTag rb = new CompoundTag();
-            if (eagerTag != null) {
-                rb.put("Items", eagerTag);
-            }
-            ContainerHelper.loadAllItems(TagValueInput.createGlobal(ProblemReporter.DISCARDING, ra), a);
-            ContainerHelper.loadAllItems(TagValueInput.createGlobal(ProblemReporter.DISCARDING, rb), b);
-            for (int i = 0; i < size; i++) {
-                if (!ItemStack.matches(a.get(i), b.get(i))) {
-                    return false;
-                }
-            }
-            return true;
-        } catch (Throwable t) {
-            // 判不出來就當成真的分歧(寧可多報一筆,也不要把真差異吞掉)
-            return false;
-        }
     }
 
     // ── 摘要(ensure 快取):HopperBlockEntity hook 的進入點 ──
