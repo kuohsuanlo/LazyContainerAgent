@@ -66,6 +66,8 @@ for m in $MODES; do
     [ "${sm:-1}" = 0 ] && ok "[$m] shadowMismatch=0" || fail "[$m] shadowMismatch=$sm"
     [ "${mm:-1}" = 0 ] && ok "[$m] summaryMismatch=0" || fail "[$m] summaryMismatch=$mm"
     # 存檔守門:載入時有東西、沒人碰過、卻要寫出空的。正常運作下恆為 0;非 0 就是資料事故。
+    # 26.2-2 沒有守門/自動降級/故障注入這些計數器與 log 行
+    if [ "${LC_HAS_PASSTHROUGH:-0}" = 1 ]; then
     sw=$(ctr "$ctrs" silentWipe); sw=${sw%%/*}
     [ "${sw:-1}" = 0 ] && ok "[$m] silentWipe=0(無靜默清空)" || fail "[$m] silentWipe=$sw —— 有容器在沒人碰的情況下被清空"
     nsm=$(grep -ac 'SAFE MODE' "$E/$m.log" || true)
@@ -73,7 +75,10 @@ for m in $MODES; do
     # 紅綠驗證台的故障注入旗標絕對不能出現在出貨驗證裡(那會故意弄壞資料)
     nfi=$(grep -ac 'FAULT INJECTION ACTIVE' "$E/$m.log" || true)
     [ "${nfi:-1}" = 0 ] && ok "[$m] 沒有帶到故障注入旗標" || fail "[$m] 帶了故障注入旗標($nfi 行)—— 這一輪的紅綠不算數"
+    fi   # LC_HAS_PASSTHROUGH
   fi
+  # 2026-09-12 revert 到 26.2-2:沒有 #261 直寫,模式 A/B/C 的直寫斷言全部跳過(LC_G4_MODES 也只剩 V A)
+  if [ "${LC_HAS_PASSTHROUGH:-0}" = 1 ]; then
   case "$m" in
     A)
       pt=$(ctr "$ctrs" rawPassthrough); em=$(ctr "$ctrs" rawEmit); rs=$(ctr "$ctrs" rawSave)
@@ -94,6 +99,7 @@ for m in $MODES; do
       [ "${mis:-1}" = 0 ] && ok "[C] ptShadowMismatch=0" || fail "[C] ptShadowMismatch=$mis"
       [ "${pt:-1}" = 0 ] && ok "[C] 觀測模式不寫直寫(rawPassthrough=0)" || fail "[C] 觀測模式竟然走了直寫 $pt" ;;
   esac
+  fi   # LC_HAS_PASSTHROUGH
 done
 echo "== G4 結構比對 =="
 cat "$E"/*.machinery.tsv 2>/dev/null | awk -F'\t' '{print $2}' | sort -u > "$E/machinery-all.txt"

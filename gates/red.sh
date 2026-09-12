@@ -20,6 +20,8 @@
 LC_TIER=RED
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 E=$LC_OUT/red; mkdir -p "$E"
+# 2026-09-12:runtime 已 revert 到 26.2-2,沒有故障注入旗標與守門,紅綠驗證台不適用。
+[ "${LC_HAS_PASSTHROUGH:-0}" = 1 ] || { warn "runtime 為 26.2-2(無 #261/守門/故障注入),RED 不適用,跳過"; tier_verdict; exit 0; }
 ROUNDS="${LC_RED_ROUNDS:-green wipeKeepRaw wipe wipe-noguard wipeAccessed badWrite corruptRaw dropSideCar}"
 EVERY="${LC_RED_EVERY:-50}"          # 每 N 個容器注入一次
 
