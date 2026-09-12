@@ -28,3 +28,4 @@ gates/plugins/*/*.jar
 gates/shape/*-fork*.txt
 gates/versions/*-fork*.env
 gates/versions/*-local.env
+bench-out/
