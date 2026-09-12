@@ -103,7 +103,184 @@ vanilla 載入一個放滿地圖畫/唱片的箱子,光把物品從 NBT 解出�
 
 ---
 
-## 怎麼運作
+## 一個箱子的一生:從讀取到存檔的時間序列
+
+以下按**真實發生順序**走一遍。括號裡是程式碼位置,想自己查證用。
+現行版本是 **26.2-2**(`26.2-9` 是同一份程式、只換版本字串)。
+
+### ① chunk 從硬碟讀進來
+
+硬碟上的區塊檔先被核心解壓、解析成一棵 NBT 樹。這一步全是核心做的,跟本 agent 無關。
+接著核心替樹上每個方塊實體(附在方塊上、替它存額外資料的物件,箱子就是一種)建出 Java 物件,
+並呼叫它的載入方法把資料填進去。
+
+### ② 箱子載入:只抄走一段 bytes,不拆物品
+
+原版在這裡會把「Items 清單」整份解碼:每一格都要查物品登錄表、解出附魔耐久等屬性、建出物品物件。
+一格倉庫幾百個箱子,這筆錢在 chunk 載入當下一次付清。
+
+本 agent 把這個呼叫改掉了(`lazycontainer$load`,template:141)。它做三件事,順序是固定的:
+
+1. 把「Items」那棵子樹原封序列化成一段 bytes 存起來。整棵 chunk 樹隨後可以被回收,記憶體只留這段 bytes。
+2. 趁樹還在手上,順便算一張**摘要**(下面第 ④ 步會用)。
+3. 最後才把「尚未解碼」的旗標打開。
+
+**省下的**:整格箱子的物品解碼,一個都沒做。
+**沒省的**:硬碟 I/O、解壓、NBT 解析,那些是核心的工作。
+**退路**:輸入不是預期的型別、或序列化出了任何意外,整個退回原版的立即解碼(計在 `eagerLoad`,正常恆為 0)。
+
+### ③ 沒人碰的時候:什麼都不做
+
+箱子就這樣躺著。記憶體裡是一段 bytes 加一張摘要,沒有物品物件。
+這是整個 agent 的全部收益來源:**倉庫區大部分箱子,從載入到卸載沒有任何人真的需要看它的內容**。
+
+### ④ 漏斗每 tick 來問:滿了嗎?這格空嗎?
+
+漏斗運作時會不斷問旁邊的容器兩件事:你滿了嗎(滿了我就不推)、這一格有東西可以拿嗎。
+原版回答這兩個問題要把整箱物品解出來看。如果為了回答就解碼,懶載入等於白做。
+
+所以漏斗的這兩個檢查點也被攔了(`isFullContainer` 與 `tryTakeInItemFromSlot`,transformer:242/246),
+改成先問那張摘要(`lazycontainer$fullState` / `slotEmpty`,template:582/595)。摘要在載入時就算好了,查詢只是讀幾個欄位:
+
+- 回答**「證明全滿」**或**「證明不滿」** → 漏斗直接用,零解碼。
+- 回答**「不知道」** → 退回原版做法,該解就解。
+
+什麼時候會說不知道:物品堆疊上限要看物品屬性才知道、遇到本工具不敢斷言的資料、或還沒開封的戰利品箱(刻意不答)。
+摘要**只會少答,不會答錯**。這件事有專門的差分測試守著:同一份資料餵給摘要和真正的解碼器,
+只要摘要開口,結論就必須跟真解碼一致(`tests/SummaryDifferentialTest.java`)。
+雙箱兩半各查,任一半證明不滿就是不滿、兩半都滿才算滿(template:457)。
+
+log 裡的 `fullQ=` 四個數字就是「證明滿 / 證明不滿 / 答不出來 / 整份放棄」的分佈。
+
+### ⑤ 有人真的要拿東西:解碼一次,之後跟原版一樣
+
+玩家開箱、漏斗真的要搬、外掛讀內容、比較器要算訊號、指令改資料 —— 這些最後都會走到取物品清單那個方法。
+那個入口被插了一行檢查:還沒解碼就先解(`getItems` / `getContents` 的 guard,transformer:307)。
+
+解碼本身(`lazycontainer$ensure`,template:239)在鎖裡面做:bytes 解回 NBT 樹 → 跑原版物品解碼 → 逐格填進清單
+→ 丟掉 bytes → **最後**才把旗標關掉。
+
+**每個箱子每次載入最多解一次。** 解完之後,這個箱子的一切行為跟沒裝 agent 完全相同。
+已解碼箱子的取用成本是「一個 volatile 讀」,不進鎖。
+
+順便記帳:解一次要多久、是誰害的(漏斗 / 比較器 / 玩家 / 商店外掛 / 存檔 / 破壞 / 原版 / 其他外掛),
+超過 100 毫秒的還會印座標。這些是 log 裡的 `decodeMs` `decodeMaxMs` `decodeHist` 與 `attr*` 各桶。
+
+### ⑥ 整批換內容:直接放棄暫存
+
+有些路徑會把整個物品清單換掉(例如指令改資料、外掛重載方塊狀態)。
+那些入口會把旗標和 bytes 一起清掉(`lazycontainer$clear`,template:312),之後就是純原版行為。
+這條路是 26.2-2 修掉「物品原地復活」那個複製漏洞的地方,不要動。
+
+### ⑦ 存檔:核心先在遊戲執行緒做副本,再由寫盤執行緒寫硬碟
+
+存檔分兩步,這件事值得講清楚:
+
+- **第一步(遊戲執行緒)**:核心把這個 chunk 的現況整理成一份「不會再變的副本」。
+  它會逐一向每個方塊實體要一份 NBT。因為遊戲還在跑,寫硬碟的人必須拿到一份定格的資料。
+- **第二步(寫盤執行緒)**:副本被序列化、壓縮、寫進區塊檔。**這一步早就不在遊戲執行緒上**,硬碟快慢影響不到遊戲。
+
+本 agent 只出現在第一步,也就是「核心來要 NBT」的那一刻(`lazycontainer$save`,template:327):
+
+- **從頭到尾沒人碰過的箱子** → 把那段 bytes 解析成 NBT 樹交出去(`lazycontainer$trySaveRaw`,template:350)。
+  這裡**只做 NBT 解析,不跑物品解碼**:不查物品登錄表、不建物品物件、不重新打包屬性。
+  每次存檔都解一棵全新的私有樹,所以存檔輸出和記憶體裡的狀態不會共用同一份資料。計在 `rawSave`。
+- **已經被碰過的箱子** → 走原版的打包流程,一步都不省。
+- 界伏盒的空清單有特別規則(原版會把空的 Items 整個丟掉),遇到就退回原版處理。
+
+整段讀旗標、讀 bytes、寫出去都在同一把鎖裡,跟進行中的解碼互斥。
+這是 26.2-2 修掉的另一個真實 bug:舊版在鎖外讀旗標,解碼解到一半時存檔,會把半填的清單寫進硬碟。
+
+**寫進硬碟的內容和原版差在哪**:結構完全相同,唯一可能不同的是 NBT compound 內部的 key 排列順序,
+那個順序本來就由 Paper 的雜湊表決定,不是資料。
+
+### ⑧ chunk 卸載
+
+存完之後 chunk 物件被丟掉,那段 bytes 跟著一起被回收。沒有跨 chunk 的快取,沒有東西留在記憶體裡。
+
+---
+
+### 跨執行緒為什麼安全
+
+多執行緒核心(Folia / EndRod 這類把世界切成多個 region 各自跑的核心)上,插件執行緒可能直接讀到活著的箱子物件。
+所以順序不是風格問題,是正確性:
+
+1. **旗標是 volatile,而且「填完才翻」**。解碼的寫入順序固定是「逐格填清單 → 丟掉 bytes → 最後關旗標」。
+   任何執行緒只要讀到旗標是關的,依 Java 記憶體模型保證清單必然已經完整。反過來寫就是舊版那個 bug:
+   實測 2000 輪裡有 1943 輪被另一條執行緒讀到半填的清單,最壞把 27 格滿箱存成空的。
+2. **會碰旗標和 bytes 的四條路徑全部進同一把鎖**:載入、解碼、存檔、整批替換。彼此排隊,不會交錯。
+3. **不進鎖的讀者只准讀那個 volatile 旗標**,正確性完全靠第 1 條。漏斗查摘要就屬於這一類。
+4. **載入的寫入順序是 bytes → 摘要 → 最後開旗標**,所以讀到旗標開著的人,一定看得到完整的 bytes 和摘要。
+5. **解碼中途會呼叫自己**(填清單時要先拿到清單物件,而 guard 看到旗標還開著會再進解碼),
+   所以有一個欄位專門記「現在是誰在解」,認出是自己就直接放行。這個欄位不能為了省事拿掉。
+
+回歸測試:`tests/EnsureRaceTest.java`,裡面有一條斷言守著「真的搶到視窗」,避免測試變成假綠。
+
+---
+
+### 現在還在的優化一覽
+
+| 名稱 | 一句話 | 生效的時刻 | log 欄位 |
+|---|---|---|---|
+| 延遲載入 | 載入時只抄 bytes,不解物品 | chunk 載入 | `stash` |
+| 存取時才解碼 | 真的有人要看才解,每箱每次載入至多一次 | 第一次被碰 | `ensure` |
+| 摘要快答 | 漏斗問滿不滿 / 這格空不空,讀欄位就能答,零解碼 | 漏斗每 tick | `summaryFull` `summarySkip` `fullQ` |
+| 存檔只做 NBT 解析 | 沒被碰過的箱子存檔時不跑物品打包 | 存檔做副本時 | `rawSave` |
+| 解碼歸因與計時 | 記錄是誰、花多久、慢的印座標 | 每次解碼 | `attr*` `decodeMs` `decodeHist` |
+| 安全退路 | 任何意外一律退回原版行為 | 全路徑 | `eagerLoad` |
+| shadow 驗證 | 上線前把兩種做法都算一遍逐位元組對照 | 開旗標時 | `shadowMismatch` |
+
+### 已經拔掉、不在線上的東西
+
+2026-09-12 起,**26.2-3 到 26.2-8 的所有新增功能都已從程式碼移除**,runtime 退回 26.2-2:
+
+- 存檔直寫(把 bytes 掛在核心的資料物件上、跳過 NBT 解析直接寫盤)
+- 暫留原始資料 10 秒、寫入保真檢查、沒人碰過卻要寫空就補回、大面積清空警報、自動降級、故障注入
+
+原因:這三個版本每次上線都發生大面積容器清空(09-08 s3;09-12 s3、s37、s69),26.2-2 則跑了數週無事。
+根因至今未破,所以整條路封掉。出貨 gate 全綠過、紅綠台驗證過,一樣出事 —— 這件事本身也記在 `gates/README.md`。
+
+現行程式碼裡已經找不到這些功能的任何殘留(對 `src/` `template/` 搜尋直寫相關符號為 0 命中)。
+替代方案的評估寫在 [`docs/DESIGN-26.2-10-safe-perf.md`](docs/DESIGN-26.2-10-safe-perf.md),**目前未實作、未上線**。
+
+### 怎麼確認它在跑
+
+開機 log 應該有這三行:
+
+```
+[LazyContainer] spliced 6 fields + 18 methods into BaseContainerBlockEntity
+[LazyContainer] transformed leaf .../ChestBlockEntity
+[LazyContainer] agent installed (transformer registered)
+```
+
+開 `-Dlazycontainer.verbose=true` 之後,每 30 秒印一行統計。主要看:
+
+- `stash` 持續往上爬 = 懶載入正在運作。
+- `ensure` 相對 `stash` 越小越好,代表大多數箱子從沒被碰過。
+- `rawSave` = 這段時間有多少次「沒被碰過的箱子」走了省事的存檔路徑。
+- `eagerLoad` `shadowMismatch` `summaryMismatch` **正常恆為 0**,不是 0 就要查。
+- 統計行裡如果出現 `rawPassthrough` `keptRaw` `badWrite` 這類字,代表跑的是**已拔除的舊版本**,該台要換回 26.2-2。
+
+### 求證表
+
+| 步驟 | 程式碼 |
+|---|---|
+| ② 載入只抄 bytes | `template/…/LazyContainerTemplate.java:141` `lazycontainer$load` |
+| ② 摘要建置 | 同檔 `:156`、演算法本體 `lazycontainer$computeSummary`(同檔案內搜尋方法名) |
+| ④ 漏斗攔截點 | `src/…/LazyContainerTransformer.java:242` `:246` `transformHopper` |
+| ④ 摘要查詢 | `template:582` `lazycontainer$fullState`、`:595` `lazycontainer$slotEmpty`、`:457` 雙箱 |
+| ⑤ 存取 guard | `src/…/LazyContainerTransformer.java:307` `guardKind` |
+| ⑤ 解碼 | `template:239` `lazycontainer$ensure` |
+| ⑥ 整批換內容 | `template:312` `lazycontainer$clear` |
+| ⑦ 存檔入口 | `template:327` `lazycontainer$save`、`:335` `saveNoEmpty` |
+| ⑦ 存檔只做 NBT 解析 | `template:350` `lazycontainer$trySaveRaw`、`:199` `lazycontainer$decodeRaw` |
+| 統計行欄位 | `src/…/LazyContainerRuntime.java:449` `stats()` |
+
+---
+
+## 怎麼運作(對照表版)
+
+> 時間順序的完整說明見上面「[一個箱子的一生](#一個箱子的一生從讀取到存檔的時間序列)」;這一節是給趕時間的人的速查。
 
 ### 白話比喻
 像搬家公司本來**每個經過倉庫的箱子都拆開檢查再封回**(連沒人問的也拆)。改成:**沒人要看的別拆;沒動過的原封出貨。**
@@ -115,10 +292,12 @@ vanilla 載入一個放滿地圖畫/唱片的箱子,光把物品從 NBT 解出�
 |---|---|---|
 | **延遲載入** | `stash` | `loadAdditional` 不呼 `ContainerHelper.loadAllItems`,改抓未解碼的原始 `Items` ListTag 暫存、標記 `pending`。**跳過解包。** |
 | **存取時物化** | `ensure` | 首次有人呼 `getItems()/getContents()` → 才把暫存的 raw 解進清單(只解這一個)。 |
-| **原樣寫回** | `rawSave` | 卸載存檔時若該容器全程沒被碰(`pending`)→ 把原始 bytes 逐位元組寫回。**跳過打包。** |
+| **存檔省打包** | `rawSave` | 存檔時若該容器全程沒被碰(`pending`)→ 把暫存 bytes 解析成 NBT 樹交給核心。**只做 NBT 解析,不跑物品打包。** |
 | **退回 eager** | `eagerLoad` | input 不是 `TagValueInput`(理論上不會)→ 安全退回原本 vanilla 行為。 |
 
 ### 跨執行緒鐵律(26.2-2,**改前必讀**)
+
+> 上面「一個箱子的一生」已用白話講過同一件事;這一節是**要動 `template/` 的人**該看的精確版本。
 
 這幾條不是風格偏好,是 26.2-2 修掉一個真實掉物/複製/存檔殘缺 bug 之後留下的不變式。**動 template 之前先讀完。**
 
@@ -176,7 +355,7 @@ vanilla 載入一個放滿地圖畫/唱片的箱子,光把物品從 NBT 解出�
 
 **它改的是「什麼時候解包」,不是「箱子存什麼」。硬碟格式從頭到尾沒變。**
 
-- **沒碰的箱子** → 寫回的是載入時讀到的同一份 bytes(逐位元組相同),沒經轉換。
+- **沒碰的箱子** → 寫回的是載入時讀到的那份資料本身(只做 NBT 解析,不經物品解碼/重新打包),物品內容不可能被改寫。
 - **被碰的箱子** → 跟 vanilla 一模一樣地解碼、再一模一樣地存回。
 - 只動箱子的 `Items`(容器裡的物品清單),不碰地形 / 方塊 / 實體 / 光照 / 其他 BE(BlockEntity,附在方塊上、替它存額外資料的物件,例如告示牌的文字、箱子的內容物)。
 
@@ -226,8 +405,8 @@ bash gates/run.sh --version 26.3        # 換版
 | G0 環境/版本 | JDK、核心 jar、classfile major、工具、素材來源 |
 | G1 建置 + 政策閘門 | 編得出來、鎖政策沒被破壞、版本字串一致 |
 | G2 注入形狀 diff | 目標版 NMS 的注入假設指紋與基準逐行比(**換版最重要的一關**) |
-| G3 差分/併發單元 | 摘要 vs 真 codec、物化競態、直寫框架、對帳告警 |
-| G4 存檔四模式 E2E | 原版/直寫/關直寫/直寫觀測 四種跑法輸出結構相等 |
+| G3 差分/併發單元 | 摘要 vs 真 codec、物化競態 |
+| G4 存檔 E2E | 原版 vs 本 agent,真倉庫逐容器輸出結構相等(直寫拔除後 `LC_HAS_PASSTHROUGH=0`,只跑這兩種) |
 | G5 逐格裁判 | 真伺服器裡逐容器逐格 `ItemStack.matches` |
 | G6 摘要/影子對抗 | 執行中用真解碼當神諭校驗每次快答 |
 | G7 互動對抗 | 真 bot + 外掛 API + 指令 + 漏斗,單一 FINAL VERDICT |
@@ -279,21 +458,19 @@ java -Xms8000M -Xmx8000M \
 | `-Dlazycontainer.dump.dir=<路徑>` | dump 落檔目錄(預設 `.` = 伺服器工作目錄)。 |
 | `-Dlazycontainer.summary=false` | 關掉「漏斗問滿不滿/這格空不空」的摘要快答(保留延遲解碼本身)。 |
 | `-Dlazycontainer.attribution=false` | 關掉解碼觸發者歸因(stats 行會印 `attribution=off`)。 |
-| `-Dlazycontainer.passthrough=false` | 關掉**存檔直寫**(見下節):未物化的箱子存檔時退回「解成 NBT 樹再交給核心重編碼」的舊路徑。 |
-| `-Dlazycontainer.passthrough.shadow=true` | 直寫的**觀測模式**:磁碟照舊寫解析出的樹(等同關掉直寫),另外把直寫真的做一遍並讀回對帳。上線前跑一天用。 |
 
-### 存檔直寫(raw passthrough)
+### 存檔直寫(raw passthrough)—— ⛔ 已於 2026-09-12 移除
 
-沒被碰過的箱子,存檔時不再把暫存的原始 bytes 解成 NBT 樹、再由核心逐節點重新序列化(#261 點名這段是艦隊 5 秒級卡頓的來源之一),而是把 bytes 直接接到核心寫區塊的輸出流:`CompoundTag` 多了一組「原始 Items」欄位,核心呼叫 `write()` 時先把它以標準 named-tag 框架(`[typeId][名稱][payload]`)吐出,其餘欄位照常;`copy()` 會一併帶走。只在核心真正為存檔收集方塊實體 NBT 的視窗(`LevelChunk.getBlockEntityNbtForSaving`)內、非 shadow、且 raw 確實是 ListTag 時啟用,其餘情況一律退回舊路徑;stats 行的 `rawPassthrough=` 計次。輸出與舊路徑**結構相等**(離線用真實 region 檔 A/B 比對過;compound 內 key 順序本來就由 Paper 的雜湊表決定)。
+26.2-3 ~ 26.2-8 曾經把暫存的 bytes 掛在核心存檔用的資料物件上、跳過 NBT 解析直接寫盤,
+後續版本又在上面加了暫留原始資料、寫入保真檢查、空寫守門、大面積清空警報與自動降級。
+**這一整條路已經從程式碼移除,runtime 退回 26.2-2。**
 
-**寫入前自檢**:掛上 bytes 之前先做一次零配置的 NBT 走訪,確認它剛好是一個完整合法的清單、長度分毫不差、字串是合法的 modified-UTF-8。規則逐條對齊伺服器讀取端或更嚴(含 `byte[]`/`int[]` 的 2^24 上限)——比讀取端嚴只會多退回舊路徑,比它寬鬆才會寫出讀不回的區塊。判定快取在方塊實體上(`rawOk`),每份 bytes 只走訪一次,自動存檔不重掃;耗時計在 `rawWalk=` / `rawWalkMaxMs=`。
+原因:那三個版本每次上線都發生大面積容器清空(09-08 s3;09-12 s3、s37、s69),而 26.2-2 跑了數週無事。
+根因未破。出貨 gate 全綠、紅綠台也驗過,一樣出事 —— 所以「gate 全綠」不等於生產安全,這點記在 [`gates/README.md`](gates/README.md)。
 
-**側車有沒有真的被寫出去**:直寫是把 bytes 掛在核心存檔用的 `CompoundTag` 上,賭核心會原封不動把它交給 `write()`。
-26.2 確實如此,但這是版本相依的前提——若哪天核心在中間重建了那個 compound,側車會被靜默丟掉(箱子存成空),
-而且三個 hook 照樣 armed、計數照樣往上加。所以 `write()` 真的吐出側車時會累加 `rawEmit=`,與 `rawPassthrough=` 對帳;
-連續數輪追不上就印 `BAD PASSTHROUGH` 並提示用 `-Dlazycontainer.passthrough=false` 止血。正常兩者只差一個 IO 落後量。
-
-**萬一 bytes 真的壞了**:走訪拒收、或解析時丟例外,都不會把它寫進區塊。該容器改走原版編碼,原始 bytes 落檔成 `lc-badraw-<座標>-N.bin` 供 `tools/mca_restore.py` 使用,座標印在 log,計在 `badRaw=`(正常恆為 0);那一行的格式對齊面板的區塊救援偵測器,會自動建案並提示用還原工具貼回。這條很重要:26.2 的 NBT 讀取端對壞資料丟的是 RuntimeException 而不是 IOException,若讓它穿出去,核心會把**整個區塊這輪的存檔丟掉**(同區塊其他容器的變更一起沒寫),而且每次自動存檔重演。
+替代方案(存檔預解析、逐格平行物化、調 autosave 節奏)的評估寫在
+[`docs/DESIGN-26.2-10-safe-perf.md`](docs/DESIGN-26.2-10-safe-perf.md),**未實作、未上線**。
+歷史設計文件保留在 [`docs/RAW-PASSTHROUGH-261.md`](docs/RAW-PASSTHROUGH-261.md) 供考古,不代表現況。
 
 ### 出事了怎麼救:`tools/mca_restore.py`
 
@@ -335,6 +512,9 @@ src/main/java/io/github/kuohsuanlo/lazycontainer/
   LazyContainerTransformer.java ASM:splice base + 改寫 leaf
 template/.../LazyContainerTemplate.java   對真實 NMS 編譯的延遲邏輯(splice 來源)
 tools/scan_containers.py        掃 region 檔找箱子最密的 chunk(找「載入最貴」的地點)
+tools/mca_restore.py            離線修/還原區塊檔(verify/list/restore-chunk/restore-items)
+tools/mca_merge3.py             整格三方合併還原(避免整格貼舊備份把新建築倒掉)
+tools/decode_bench.sh           離線量存檔路徑 NBT 解析與物品解碼的成本(序列 vs 多核心)
 tests/.../SummaryDifferentialTest.java  摘要 vs 真 codec 差分(含 A2 案例)
 tests/.../EnsureRaceTest.java          跨執行緒物化視窗回歸(26.2-2 / A1)
 tests/.../NmsTestSupport.java          零 Minecraft server 的 headless NMS 啟動

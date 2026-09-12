@@ -1,5 +1,8 @@
 # LazyContainerAgent
 
+> ⚠️ **2026-09-12**: the raw-passthrough save path and everything built on it (26.2-3 … 26.2-8) has been **removed**; the runtime is back to 26.2-2 (`26.2-9` is the same code with a different version string). This English page may still describe removed behaviour — the Chinese README is the current one.
+
+
 [中文](README.md) ｜ **English**
 
 > **A Java agent that lazily deserializes container items, and writes untouched containers back byte-for-byte.**
