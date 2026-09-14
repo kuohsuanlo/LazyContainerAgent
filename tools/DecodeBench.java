@@ -7,6 +7,8 @@ import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.util.ArrayList;
 import java.util.List;
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.util.concurrent.ForkJoinPool;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.InflaterInputStream;
@@ -39,7 +41,7 @@ public final class DecodeBench {
             System.exit(2);
         }
         NmsTestSupport.bootstrap();
-        List<byte[]> raws = new ArrayList<>();
+        List<byte[][]> raws = new ArrayList<>();
         List<Integer> sizes = new ArrayList<>();
         long chunks = 0;
         long bes = 0;
@@ -96,16 +98,49 @@ public final class DecodeBench {
         }
         long bytes = 0;
         int nonEmpty = 0;
-        for (byte[] r : raws) {
-            bytes += r.length;
-            if (r.length > 8) {
+        long maxOne = 0;
+        int segsTotal = 0;
+        for (byte[][] r : raws) {
+            long len = LazyContainerRuntime.rawLength(r);
+            bytes += len;
+            segsTotal += r.length;
+            maxOne = Math.max(maxOne, len);
+            if (len > 8) {
                 nonEmpty++;
             }
         }
         System.out.printf("素材: chunk=%d 方塊實體=%d 有 Items 的容器=%d(非空 %d) raw 總量=%.1f MB 平均 %.0f bytes/容器%n",
                 chunks, bes, raws.size(), nonEmpty, bytes / 1048576.0, raws.isEmpty() ? 0.0 : (double) bytes / raws.size());
         int cores = Runtime.getRuntime().availableProcessors();
-        System.out.println("本機 CPU=" + cores);
+        System.out.println("本機 CPU=" + cores + " 單一容器最大 raw=" + (maxOne / 1024) + " KB 分段總數=" + segsTotal);
+
+        // ── 0:分段 encode vs 舊版單一緩衝 encode,真實資料逐位元組對拍 ──
+        int diff = 0;
+        long refNanos = 0;
+        long segNanos = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            diff = 0;
+            long t0 = System.nanoTime();
+            List<byte[]> refs = new ArrayList<>(raws.size());
+            for (int i = 0; i < raws.size(); i++) {
+                refs.add(referenceEncode(LazyContainerTemplate.lazycontainer$decodeRaw(raws.get(i))));
+            }
+            refNanos = System.nanoTime() - t0;
+            long t1 = System.nanoTime();
+            List<byte[][]> segs = new ArrayList<>(raws.size());
+            for (int i = 0; i < raws.size(); i++) {
+                segs.add(LazyContainerTemplate.lazycontainer$encodeRaw(LazyContainerTemplate.lazycontainer$decodeRaw(raws.get(i))));
+            }
+            segNanos = System.nanoTime() - t1;
+            for (int i = 0; i < raws.size(); i++) {
+                if (!java.util.Arrays.equals(refs.get(i), flat(segs.get(i)))) {
+                    diff++;
+                }
+            }
+        }
+        System.out.printf("0 encode 對拍:%d 個容器,分段版與舊版單一緩衝**位元組不同的 = %d**(必須是 0);"
+                + "耗時 舊版 %d ms vs 分段 %d ms%n",
+                raws.size(), diff, refNanos / 1_000_000, segNanos / 1_000_000);
 
         // ── A:26.2-2 存檔路徑的 parse(bytes → ListTag),序列 ──
         for (int w = 0; w < 2; w++) {
@@ -199,10 +234,32 @@ public final class DecodeBench {
         }
     }
 
-    private static long serialParse(List<byte[]> raws) throws Exception {
+    /** 舊版(單一連續緩衝)encode,對拍用。 */
+    private static byte[] referenceEncode(net.minecraft.nbt.Tag tag) throws Exception {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream(256);
+        DataOutputStream dos = new DataOutputStream(bos);
+        net.minecraft.nbt.NbtIo.writeAnyTag(tag, dos);
+        return bos.toByteArray();
+    }
+
+    private static byte[] flat(byte[][] segs) {
+        int n = 0;
+        for (byte[] s : segs) {
+            n += s.length;
+        }
+        byte[] out = new byte[n];
+        int p = 0;
+        for (byte[] s : segs) {
+            System.arraycopy(s, 0, out, p, s.length);
+            p += s.length;
+        }
+        return out;
+    }
+
+    private static long serialParse(List<byte[][]> raws) throws Exception {
         long t0 = System.nanoTime();
         long sink = 0;
-        for (byte[] r : raws) {
+        for (byte[][] r : raws) {
             Tag t = LazyContainerTemplate.lazycontainer$decodeRaw(r);
             sink += (t instanceof ListTag) ? ((ListTag) t).size() : 0;
         }
@@ -212,7 +269,7 @@ public final class DecodeBench {
         return System.nanoTime() - t0;
     }
 
-    private static long parallelParse(List<byte[]> raws, ForkJoinPool pool) throws Exception {
+    private static long parallelParse(List<byte[][]> raws, ForkJoinPool pool) throws Exception {
         long t0 = System.nanoTime();
         long sink = pool.submit(() -> raws.parallelStream().mapToLong(r -> {
             try {
@@ -228,7 +285,7 @@ public final class DecodeBench {
         return System.nanoTime() - t0;
     }
 
-    private static void materialize(byte[] raw, NonNullList<ItemStack> list) throws Exception {
+    private static void materialize(byte[][] raw, NonNullList<ItemStack> list) throws Exception {
         Tag t = LazyContainerTemplate.lazycontainer$decodeRaw(raw);
         CompoundTag tmp = new CompoundTag();
         tmp.put("Items", t);

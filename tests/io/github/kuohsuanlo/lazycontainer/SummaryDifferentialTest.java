@@ -650,27 +650,45 @@ class SummaryDifferentialTest {
             for (int i = 0; i < n; i++) {
                 items.add(randomEntry(r));
             }
-            byte[] b = LazyContainerTemplate.lazycontainer$encodeRaw(items);
+            byte[][] b = LazyContainerTemplate.lazycontainer$encodeRaw(items);
             Tag back = LazyContainerTemplate.lazycontainer$decodeRaw(b);
             assertEquals(items, back, "decode(encode(t)) 必須等於 t(掉物=資料毀損)");
             // 位元組層面:Paper 把 CompoundTag 換成 fastutil Object2ObjectOpenHashMap(8, 0.8f),key 迭代順序
             // 不是插入順序——compound 內 ≥2 個 key 時 decode→encode 後順序可能調換(3000 份中有少數樣本;
             // 多數翻轉呈週期 2,但不是全部)。這是 Paper 既有性質、vanilla 重存也改順序,不是資料變更。
             // 三條斷言各守一件事:
-            byte[] b2 = LazyContainerTemplate.lazycontainer$encodeRaw(back);
+            byte[][] b2 = LazyContainerTemplate.lazycontainer$encodeRaw(back);
             // (1) 結構不變:重排不得改變任何內容(CompoundTag.equals 是 map 相等,順序無關)
             assertEquals(back, LazyContainerTemplate.lazycontainer$decodeRaw(b2), "再解一次必須結構相等(資料不變)");
             // (2) 決定性:存檔永遠從同一份 raw 出發,同一份 bytes 解兩次 encode 必須相同(每次存檔寫出同樣的東西)
-            assertArrayEquals(b2, LazyContainerTemplate.lazycontainer$encodeRaw(LazyContainerTemplate.lazycontainer$decodeRaw(b)),
+            assertArrayEquals(flat(b2), flat(LazyContainerTemplate.lazycontainer$encodeRaw(LazyContainerTemplate.lazycontainer$decodeRaw(b))),
                     "同一份 raw 解兩次、各自 encode 必須逐位元組相同(存檔決定性)");
             // (3) 有鑑別力的強斷言:每個 compound 的 key 數 ≤1 的樣本(無順序可言)仍必須逐位元組穩定——
             //     哪天 encode 真的掉東西/改型別,這條會紅,不會被「順序」這個理由掩蓋
             if (maxCompoundKeys(items) <= 1) {
-                assertArrayEquals(b, b2, "單 key compound 樣本必須逐位元組穩定(encode 不得掉東西或改型別)");
+                assertArrayEquals(flat(b), flat(b2), "單 key compound 樣本必須逐位元組穩定(encode 不得掉東西或改型別)");
             }
         }
         assertNull(LazyContainerTemplate.lazycontainer$encodeRaw(null));
         assertNull(LazyContainerTemplate.lazycontainer$decodeRaw(null));
+    }
+
+    /** 把分段 raw 攤平成單一 byte[](測試用:位元組層面的斷言要看整條序列)。 */
+    static byte[] flat(byte[][] segs) {
+        if (segs == null) {
+            return null;
+        }
+        int n = 0;
+        for (byte[] s : segs) {
+            n += s.length;
+        }
+        byte[] out = new byte[n];
+        int p = 0;
+        for (byte[] s : segs) {
+            System.arraycopy(s, 0, out, p, s.length);
+            p += s.length;
+        }
+        return out;
     }
 
     @Test
@@ -699,10 +717,10 @@ class SummaryDifferentialTest {
             box.put("components", comps);
             items.add(box);
         }
-        byte[] b = LazyContainerTemplate.lazycontainer$encodeRaw(items);
+        byte[][] b = LazyContainerTemplate.lazycontainer$encodeRaw(items);
         Tag back = LazyContainerTemplate.lazycontainer$decodeRaw(b);
         assertEquals(items, back, "深巢結構往返必須恆等");
-        assertArrayEquals(b, LazyContainerTemplate.lazycontainer$encodeRaw(back), "深巢 byte 穩定");
+        assertArrayEquals(flat(b), flat(LazyContainerTemplate.lazycontainer$encodeRaw(back)), "深巢 byte 穩定");
         // 內層 count:1 逐一還在
         ListTag backL = (ListTag) back;
         CompoundTag c0 = (CompoundTag) backL.get(0);

@@ -39,6 +39,196 @@ public final class LazyContainerRuntime {
     /** 良性:raw 與 eager 只是 Items 清單順序不同、物品與槽位完全相同(已安全寫 raw,不算 mismatch)。 */
     public static final AtomicLong benignReorder = new AtomicLong();
 
+    // ── raw 分段緩衝(26.2-10):不產生 G1 humongous 物件 ──
+    //
+    // 舊版用 ByteArrayOutputStream(256) 收 encode 結果:容量倍增(256→512→…→32MB)再 toByteArray 複製一次,
+    // 一個 26 MB 的倉庫箱子光載入就配出一串「超過半個 G1 region」的 humongous 物件(s18 the_end 實例:
+    // region 4M ⟹ 門檻 2MB、gc.log 1,742 行 humongous、每小時數次 Full GC 全 JVM 停 2–6 秒)。
+    // 改成固定上限的分段:每段最多 SEG_MAX,寫滿就接下一段。
+    //   * 不倍增、不整份複製(只有最後一段裁到剛好,≤SEG_MAX)
+    //   * 沒有「先算大小、算錯就爆掉」這種失敗情況——長度是寫出來的,不是估出來的
+    //   * 任何一段都遠小於 humongous 門檻(最小的 1M region 門檻是 512KB,SEG_MAX 仍只有它的一半)
+    // 寫出去的 bytes 與舊版**逐位元組相同**(RawSegmentsTest + 真實 region 對拍)。
+
+    /** 單段上限。256KB:比最小 G1 region(1M)的 humongous 門檻(512KB)還小一半。 */
+    public static final int SEG_MAX = 256 * 1024;
+    /** 第一段大小:絕大多數容器一段就夠(單段時只付一次裁切複製,比舊版倍增少配置)。 */
+    private static final int SEG_FIRST = 8 * 1024;
+    /** 第二段大小(中型容器的折衷,之後一律 SEG_MAX)。 */
+    private static final int SEG_SECOND = 64 * 1024;
+
+    /** 單一容器 raw 超過這個大小就印一行座標(營運用,不是錯誤)。0=不印。 */
+    private static final long BIG_RAW_BYTES =
+            Long.getLong("lazycontainer.bigRaw.bytes", 4L * 1024 * 1024);
+    /** 巨箱告警最多印幾行(避免洗版);之後只進計數器。 */
+    private static final int BIG_RAW_LOG_MAX = Integer.getInteger("lazycontainer.bigRaw.log", 40);
+
+    /** 載入時 raw ≥ BIG_RAW_BYTES 的容器數。 */
+    public static final AtomicLong rawBig = new AtomicLong();
+    /** 看過最大的單一容器 raw(bytes)。 */
+    public static final AtomicLong rawMaxBytes = new AtomicLong();
+    private static final AtomicLong rawBigLogged = new AtomicLong();
+
+    /**
+     * 分段輸出:{@link java.io.OutputStream} 介面,給 {@code DataOutputStream}/{@code NbtIo.writeAnyTag} 用。
+     * <p>單執行緒使用(呼叫端持有容器 monitor),不做同步。</p>
+     */
+    public static final class RawOut extends java.io.OutputStream {
+
+        private byte[][] segs = new byte[8][];
+        private int n;
+        private byte[] cur;
+        private int pos;
+        private long total;
+
+        public RawOut() {
+            newSegment(SEG_FIRST);
+        }
+
+        private void newSegment(int size) {
+            if (this.n == this.segs.length) {
+                this.segs = java.util.Arrays.copyOf(this.segs, this.segs.length * 2);
+            }
+            this.cur = new byte[size];
+            this.segs[this.n++] = this.cur;
+            this.pos = 0;
+        }
+
+        /** 下一段要多大:8KB → 64KB → 之後一律 256KB(不倍增、有上限)。 */
+        private int nextSize() {
+            return this.n == 1 ? SEG_SECOND : SEG_MAX;
+        }
+
+        @Override
+        public void write(int b) {
+            if (this.pos == this.cur.length) {
+                newSegment(nextSize());
+            }
+            this.cur[this.pos++] = (byte) b;
+            this.total++;
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) {
+            if (off < 0 || len < 0 || off + len > b.length) {
+                throw new IndexOutOfBoundsException();
+            }
+            while (len > 0) {
+                if (this.pos == this.cur.length) {
+                    newSegment(nextSize());
+                }
+                int c = Math.min(len, this.cur.length - this.pos);
+                System.arraycopy(b, off, this.cur, this.pos, c);
+                this.pos += c;
+                off += c;
+                len -= c;
+                this.total += c;
+            }
+        }
+
+        /** 收尾:最後一段裁到剛好(複製 ≤SEG_MAX),回傳分段陣列。 */
+        public byte[][] toSegments() {
+            byte[][] out = java.util.Arrays.copyOf(this.segs, this.n);
+            if (this.pos != this.cur.length) {
+                out[this.n - 1] = java.util.Arrays.copyOf(this.cur, this.pos);
+            }
+            return out;
+        }
+
+        public long size() {
+            return this.total;
+        }
+    }
+
+    /** 分段輸入:把 {@link RawOut} 產生的分段接回一條位元組流。單執行緒使用。 */
+    public static final class RawIn extends java.io.InputStream {
+
+        private final byte[][] segs;
+        private int si;
+        private int pos;
+
+        public RawIn(byte[][] segs) {
+            this.segs = segs;
+        }
+
+        private boolean advance() {
+            while (this.si < this.segs.length && this.pos == this.segs[this.si].length) {
+                this.si++;
+                this.pos = 0;
+            }
+            return this.si < this.segs.length;
+        }
+
+        @Override
+        public int read() {
+            if (!advance()) {
+                return -1;
+            }
+            return this.segs[this.si][this.pos++] & 0xFF;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) {
+            if (off < 0 || len < 0 || off + len > b.length) {
+                throw new IndexOutOfBoundsException();
+            }
+            if (len == 0) {
+                return 0;
+            }
+            if (!advance()) {
+                return -1;
+            }
+            byte[] s = this.segs[this.si];
+            int c = Math.min(len, s.length - this.pos);
+            System.arraycopy(s, this.pos, b, off, c);
+            this.pos += c;
+            return c;
+        }
+
+        @Override
+        public int available() {
+            long left = 0;
+            for (int i = this.si; i < this.segs.length; i++) {
+                left += this.segs[i].length;
+            }
+            left -= this.pos;
+            return (int) Math.min(Integer.MAX_VALUE, Math.max(0L, left));
+        }
+    }
+
+    /** 分段總長度(bytes);null 回 0。 */
+    public static long rawLength(byte[][] segs) {
+        if (segs == null) {
+            return 0L;
+        }
+        long t = 0L;
+        for (byte[] s : segs) {
+            if (s != null) {
+                t += s.length;
+            }
+        }
+        return t;
+    }
+
+    /**
+     * 載入時記一筆 raw 大小:更新最大值,超過門檻就印一行座標(限流)。
+     * <p>純觀測,絕不改變載入行為;任何例外都吞掉。</p>
+     */
+    public static void onRawStored(long bytes, String pos) {
+        long prev = rawMaxBytes.get();
+        while (bytes > prev && !rawMaxBytes.compareAndSet(prev, bytes)) {
+            prev = rawMaxBytes.get();
+        }
+        if (BIG_RAW_BYTES <= 0 || bytes < BIG_RAW_BYTES) {
+            return;
+        }
+        rawBig.incrementAndGet();
+        if (rawBigLogged.incrementAndGet() <= BIG_RAW_LOG_MAX) {
+            System.out.println("[LazyContainer] BIG CONTAINER " + (bytes / 1024) + " KB @ " + pos
+                    + " —— 這格載入/存檔都特別貴,可考慮讓它少反覆載卸");
+        }
+    }
+
     /**
      * {@code -Dlazycontainer.summary=false} 單獨關掉「摘要(ensure 快取)」,保留延遲解碼本體。
      * <p>獨立 kill switch:本 agent 已在 production,萬一摘要在真實地圖上冒出行為差異,
@@ -457,6 +647,8 @@ public final class LazyContainerRuntime {
                 + " summaryMismatch=" + summaryMismatch.sum()
                 + " shadowMismatch=" + shadowMismatch.get()
                 + " benignReorder=" + benignReorder.get()
+                + " rawMaxKB=" + (rawMaxBytes.get() / 1024L)
+                + " rawBig=" + rawBig.get()
                 // 關閉時印明確標記而非八個 0——值班的人才分得出「功能關著」與「歸因掛了」(審查 low)
                 + (ATTRIBUTION
                         ? " attrHopper=" + attrHopper.sum()

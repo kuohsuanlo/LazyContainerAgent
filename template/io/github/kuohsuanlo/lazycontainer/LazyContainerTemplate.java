@@ -1,7 +1,5 @@
 package io.github.kuohsuanlo.lazycontainer;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.util.Objects;
@@ -49,7 +47,7 @@ import net.minecraft.world.level.storage.ValueOutput;
  * <h3>不變式(資料安全鐵律)</h3>
  * <ul>
  *   <li>{@code lazycontainer$pending == true} ⟺ items 清單「尚未物化」(仍是載入時建立的全空清單),
- *       真正內容以 <b>NBT 二進位序列化的 {@code byte[]}</b> 暫存在 {@code lazycontainer$raw}
+ *       真正內容以 <b>NBT 二進位序列化的分段 {@code byte[][]}</b> 暫存在 {@code lazycontainer$raw}
  *       (原本是 {@link Tag} 樹;s18 材料站 OOM 事故證明 26 MB 的 Items 樹會佔 80–260 MB heap,
  *       改存 bytes 後滯留量就是 bytes 本身,見面板 #160 方案 A′)。</li>
  *   <li>一旦任何存取點呼叫 {@code getItems()/getContents()},entry-guard 會先呼叫
@@ -102,7 +100,15 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
      * 上游的壓縮串流早就不在了;而 {@code Tag} 是 sealed interface,也做不出 byte-backed 的假 Tag
      * 讓存檔直接吐 bytes——那兩條都是方案 B(改核心)的領域。</p>
      */
-    public byte[] lazycontainer$raw;
+    public byte[][] lazycontainer$raw;
+
+    /**
+     * 這個容器「載入當下」的原始 Items 大小(bytes)。**物化後不清掉**(sticky):
+     * 它是給外掛判斷「這格重不重」用的權重,清掉會讓權重在玩家開過箱子後忽然歸零、
+     * chunk 被放掉又馬上重載(抖動)。純觀測值,不參與任何存檔決策。
+     * <p>非目標容器 / eager 載入 = 0。</p>
+     */
+    public int lazycontainer$rawLen;
 
     // ── 摘要(ensure 快取):讓漏斗的滿/空檢查不必觸發整箱解碼 ──
     // 不變式:摘要只能在「答案可證明與 vanilla 解碼後行為完全一致」時給出定論;
@@ -142,7 +148,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         this.lazycontainer$sumState = 0;    // 換了新 raw,舊摘要作廢
         if (input instanceof TagValueInput) {
             Tag itemsTag = ((TagValueInput) input).input.get("Items");
-            byte[] encoded;
+            byte[][] encoded;
             try {
                 encoded = lazycontainer$encodeRaw(itemsTag);
             } catch (Throwable t) {
@@ -153,6 +159,14 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
                 return;
             }
             this.lazycontainer$raw = encoded;
+            // 權重(給外掛判斷這格重不重)+ 巨箱告警。純觀測,失敗不得影響載入。
+            long rawBytes0 = LazyContainerRuntime.rawLength(encoded);
+            this.lazycontainer$rawLen = (int) Math.min((long) Integer.MAX_VALUE, rawBytes0);
+            try {
+                LazyContainerRuntime.onRawStored(rawBytes0, this.getBlockPos().toShortString());
+            } catch (Throwable ignored) {
+                // 觀測失敗絕不影響載入
+            }
             // 摘要 eager 建置:樹此刻還在(免 parse);查詢端不再 lazy build(sumState==0 一律當「不知道」)
             if (LazyContainerRuntime.summary()) {
                 long packed;
@@ -185,22 +199,25 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
     }
 
     /** Tag → NBT 二進位({@code NbtIo.writeAnyTag} 框架);null 進 null 出。 */
-    public static byte[] lazycontainer$encodeRaw(Tag tag) throws java.io.IOException {
+    public static byte[][] lazycontainer$encodeRaw(Tag tag) throws java.io.IOException {
         if (tag == null) {
             return null;
         }
-        ByteArrayOutputStream bos = new ByteArrayOutputStream(256);
-        DataOutputStream dos = new DataOutputStream(bos);
+        // 分段輸出:不倍增、不整份複製、每段都小於 G1 humongous 門檻(見 LazyContainerRuntime.RawOut)。
+        // 位元組序列與舊版 ByteArrayOutputStream 版**完全相同**(RawSegmentsTest 對拍)。
+        LazyContainerRuntime.RawOut out = new LazyContainerRuntime.RawOut();
+        DataOutputStream dos = new DataOutputStream(out);
         NbtIo.writeAnyTag(tag, dos);
-        return bos.toByteArray();
+        dos.flush();
+        return out.toSegments();
     }
 
     /** NBT 二進位 → Tag(與 {@link #lazycontainer$encodeRaw} 嚴格對稱);null 進 null 出。 */
-    public static Tag lazycontainer$decodeRaw(byte[] bytes) throws java.io.IOException {
-        if (bytes == null) {
+    public static Tag lazycontainer$decodeRaw(byte[][] segs) throws java.io.IOException {
+        if (segs == null) {
             return null;
         }
-        DataInputStream dis = new DataInputStream(new ByteArrayInputStream(bytes));
+        DataInputStream dis = new DataInputStream(new LazyContainerRuntime.RawIn(segs));
         return NbtIo.readAnyTag(dis, NbtAccounter.unlimitedHeap());
     }
 
@@ -249,7 +266,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
             }
             this.lazycontainer$ensuring = Thread.currentThread();
             try {
-                byte[] rawBytes = this.lazycontainer$raw;
+                byte[][] rawBytes = this.lazycontainer$raw;
                 if (rawBytes != null) {
                     // 歸因(#223 未結②)+ 解碼計時(#223 未結①):堆疊要在解碼「之前」抓(之後鏈就沒了),
                     // 耗時要包住真解碼。每容器每次載入至多一次、不在 tick 熱路徑。
@@ -351,7 +368,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
         if (!this.lazycontainer$pending) {
             return false;
         }
-        byte[] rawBytes = this.lazycontainer$raw;
+        byte[][] rawBytes = this.lazycontainer$raw;
         if (rawBytes == null || !(output instanceof TagValueOutput)) {
             // 沒有 Items 可回寫 / output 型別非預期:物化後讓呼叫端走正常 encode(語意等同 vanilla)
             this.lazycontainer$ensure();
@@ -589,6 +606,34 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
             LazyContainerRuntime.onFullQuery(st, tri);   // 「為什麼不肯答」的分佈:逐格解碼值不值得做的判準
         }
         return tri;
+    }
+
+    /**
+     * 給外掛用的 chunk 權重:這一格所有容器「載入時原始 Items 的 bytes」總和。
+     * <p><b>不解碼、不配置、不碰 Items</b>,只把每個容器上那個已經算好的 {@code lazycontainer$rawLen} 加起來,
+     * 成本 = O(方塊實體數)。用途:外掛據此判斷「這格重不重」,替重的格加一張 plugin chunk ticket、
+     * 讓它晚一點卸載(避免玩家在視距邊緣晃兩下就整格重載一次)。</p>
+     * <p><b>呼叫端必須在該 chunk 所屬的 region 執行緒上呼叫</b>(要走 map 迭代);
+     * 任何意外(含跨執行緒造成的 ConcurrentModificationException)一律回 -1 = 不知道,呼叫端請直接跳過。</p>
+     *
+     * @param chunk NMS {@code LevelChunk}
+     * @return bytes 總和;-1 = 這次量不到
+     */
+    public static long lazycontainer$chunkWeight(net.minecraft.world.level.chunk.LevelChunk chunk) {
+        if (chunk == null) {
+            return -1L;
+        }
+        try {
+            long total = 0L;
+            for (net.minecraft.world.level.block.entity.BlockEntity be : chunk.getBlockEntities().values()) {
+                if (be instanceof LazyContainerTemplate) {
+                    total += ((LazyContainerTemplate) be).lazycontainer$rawLen;
+                }
+            }
+            return total;
+        } catch (Throwable t) {
+            return -1L;
+        }
     }
 
     /** 單箱單格「證明為空」;非 pending 或未開封 loot 容器恆回 false。計數由聚合端負責。 */
