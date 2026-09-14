@@ -313,7 +313,16 @@ for l in LABELS:
     bad = [d for d in r['diffs'] if not hopper_ok(d)]
     (OK if not bad else F)(f"[{l}] 漏斗段差異 {r['diff']} 筆:箱/木桶/界伏盒的變動全部有機械事件證據且其他欄位不變(不合格 {len(bad)})")
     for d in bad[:5]: print("       ", d['key'], d['kind'], d.get('id'), 'nearHopper', d.get('nearHopper'))
-    crafts = [p for p in ev['CRAFT'] if p[3] == census[l]['dim'] and int(p[0]) >= mid_epoch]
+    # 合成器事件要按「素材 region」分,不能只看維度:s18 與 s45 兩份素材都在終界,
+    # 只比維度會把 s45 那台合成器的 18 次產出也算到 s18 頭上(2026-09-15 全關:s18 預期差 -144、實際 0 ⟹ 假紅)。
+    _rx, _rz = (int(v) for v in census[l]['reg'].split('.')[1:3])
+    def _in_reg(pos):
+        try:
+            x, _y, z = (int(v) for v in pos.split(','))
+            return (x >> 9) == _rx and (z >> 9) == _rz
+        except Exception:
+            return False
+    crafts = [p for p in ev['CRAFT'] if p[3] == census[l]['dim'] and _in_reg(p[4]) and int(p[0]) >= mid_epoch]
     produced = sum(int(re.search(r'amount=(\d+)', p[5]).group(1)) for p in crafts)
     consumed = sum(int(re.search(r'consumed=(\d+)', p[5]).group(1)) for p in crafts)
     expect_delta = produced - consumed
@@ -325,11 +334,24 @@ for l in LABELS:
     for key, (a_, b_) in r['multisetDelta'].items():
         per_id[key.split('|')[0]] += b_ - a_
     id_net = {k: v for k, v in per_id.items() if v != 0}
+    # 合成器會改物品 id(9 綠寶石 → 1 綠寶石磚):產出的 id 照事件扣回;扣完剩下的只准是「負的、合計 = 消耗數」
+    # (事件只記消耗數量不記材料 id),任何剩下的正值 = 無中生有。
+    produced_by_id = collections.Counter()
+    for p in crafts:
+        m_ = re.search(r'result=(\S+) amount=(\d+)', p[5])
+        if m_: produced_by_id[m_.group(1)] += int(m_.group(2))
+    residual = collections.Counter(id_net)
+    for k, v in produced_by_id.items(): residual[k] -= v
+    residual = {k: v for k, v in residual.items() if v != 0}
+    res_pos = {k: v for k, v in residual.items() if v > 0}
+    res_neg = sum(v for v in residual.values() if v < 0)
+    id_ok = (not res_pos) and (res_neg == -consumed)
     (OK if actual_delta == expect_delta else F)(
         f"[{l}] 物品總數守恆:{r['itemsTotalIn']}→{r['itemsTotalOut']}(差 {actual_delta}),"
         f"合成器 {len(crafts)} 次產出 {produced} 消耗 {consumed} ⟹ 預期差 {expect_delta}")
-    (OK if not id_net else F)(
-        f"[{l}] 沒有任何物品 id 憑空增減(身分變動 {r['multisetDeltaKinds']} 種,淨變化不為 0 的 id:{len(id_net)})")
+    (OK if id_ok else F)(
+        f"[{l}] 沒有任何物品 id 憑空增減(身分變動 {r['multisetDeltaKinds']} 種,淨變化不為 0 的 id:{len(id_net)};"
+        f"扣掉合成器產出後剩 正{sum(res_pos.values())} 負{res_neg},合成器消耗 {consumed})")
     for k, v in list(id_net.items())[:5]: print("       ", k, "淨變化", v)
     (OK if r['missing'] == 0 and r['extra'] == 0 else F)(f"[{l}] 漏斗段 MISSING={r['missing']} EXTRA={r['extra']}")
 
