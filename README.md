@@ -230,7 +230,7 @@ log 裡的 `fullQ=` 四個數字就是「證明滿 / 證明不滿 / 答不出來
 | 安全退路 | 任何意外一律退回原版行為 | 全路徑 | `eagerLoad` |
 | shadow 驗證 | 上線前把兩種做法都算一遍逐位元組對照 | 開旗標時 | `shadowMismatch` |
 | 分段 raw(26.2-10) | bytes 分成 ≤256 KB 的段,不倍增、不整份複製,永遠不產生 G1 humongous 物件;寫出的 bytes 與舊版逐位元組相同 | chunk 載入 | `rawMaxKB` `rawBig` |
-| chunk 權重(26.2-10) | 每箱記下載入時的大小,`lazycontainer$chunkWeight` 加總給 ChunkHoldManager 判斷「重的格」 | 外掛查詢時 | — |
+| chunk 權重(26.2-10) | 每箱記下載入時的大小,`lazycontainer$chunkWeight` 加總給 ChunkForceManager 26.2-4 判斷「重的格」 | 外掛查詢時 | — |
 
 ### 26.2-10 改了什麼(2026-09-14,交付單 #329 / #331)
 
@@ -241,11 +241,12 @@ log 裡的 `fullQ=` 四個數字就是「證明滿 / 證明不滿 / 答不出來
    改成每段 ≤256 KB 的分段:不倍增、不整份複製、沒有「先估大小、估錯就爆掉」這種失敗情況。
    真實 region 56,265 個容器對拍:**分段版與舊版位元組不同 = 0**;順便快了一點(讀取端沒有 `ByteArrayInputStream` 的 synchronized)。
 2. **chunk 權重**:每箱記下載入時的大小(物化後不清,避免權重抖動),`lazycontainer$chunkWeight(LevelChunk)` 把整格加總。
-   給姊妹外掛 [ChunkHoldManager](../ChunkHoldManager/) 用:重的格掛 plugin ticket 晚一點卸載、輕的格不碰。
+   給姊妹外掛 [ChunkForceManager](https://github.com/kuohsuanlo/ChunkForceManager) 26.2-4 用:重的格第一次載入就用 EndRod `EndRodHotspotPin` API 釘住
+   (level 33:常駐、**不 tick**),輕的格不碰。⛔ 不可用 `addPluginChunkTicket`(level 31 會 tick,r174 在 s3 踩過)。
    這是 2026-06 ChunkForceManager 做不到的事 —— 它為了秤重去序列化每個物品,把 s48 秤到 OOM;現在秤是免費的。
 
 沒做的:卸載存檔那一次 NBT 解析仍在 region 執行緒上(#329 卡的那幾秒)。要讓它消失只有直寫(已封殺)或平行預解析(服主裁示不做)。
-ChunkHoldManager 做的是把次數壓下來。
+ChunkForceManager 做的是把次數壓下來。
 
 ### 已經拔掉、不在線上的東西
 
@@ -258,7 +259,7 @@ ChunkHoldManager 做的是把次數壓下來。
 根因至今未破,所以整條路封掉。出貨 gate 全綠過、紅綠台驗證過,一樣出事 —— 這件事本身也記在 `gates/README.md`。
 
 現行程式碼裡已經找不到這些功能的任何殘留(對 `src/` `template/` 搜尋直寫相關符號為 0 命中)。
-替代方案的評估寫在 [`docs/DESIGN-26.2-10-safe-perf.md`](docs/DESIGN-26.2-10-safe-perf.md),**目前未實作、未上線**。
+替代方案的評估寫在 [`docs/DESIGN-safe-perf-proposals.md`](docs/DESIGN-safe-perf-proposals.md),**目前未實作、未上線**。
 
 ### 怎麼確認它在跑
 
@@ -487,7 +488,7 @@ java -Xms8000M -Xmx8000M \
 根因未破。出貨 gate 全綠、紅綠台也驗過,一樣出事 —— 所以「gate 全綠」不等於生產安全,這點記在 [`gates/README.md`](gates/README.md)。
 
 替代方案(存檔預解析、逐格平行物化、調 autosave 節奏)的評估寫在
-[`docs/DESIGN-26.2-10-safe-perf.md`](docs/DESIGN-26.2-10-safe-perf.md),**未實作、未上線**。
+[`docs/DESIGN-safe-perf-proposals.md`](docs/DESIGN-safe-perf-proposals.md),**未實作、未上線**。
 歷史設計文件保留在 [`docs/RAW-PASSTHROUGH-261.md`](docs/RAW-PASSTHROUGH-261.md) 供考古,不代表現況。
 
 ### 出事了怎麼救:`tools/mca_restore.py`
@@ -533,7 +534,7 @@ tools/scan_containers.py        掃 region 檔找箱子最密的 chunk(找「載
 tools/mca_restore.py            離線修/還原區塊檔(verify/list/restore-chunk/restore-items)
 tools/mca_merge3.py             整格三方合併還原(避免整格貼舊備份把新建築倒掉)
 tools/decode_bench.sh           離線量存檔路徑 NBT 解析與物品解碼的成本(序列 vs 多核心)
-gates/chunkhold_e2e.sh          ChunkHoldManager 真伺服器端對端(Paper / EndRod rig)
+gates/cfm_e2e.sh                ChunkForceManager 26.2-4 真伺服器端對端(Paper / EndRod rig;常駐探針看 /cforce status 的 resident=)
 tests/.../RawSegmentsTest.java  分段 raw 與舊版逐位元組對拍
 tests/.../SummaryDifferentialTest.java  摘要 vs 真 codec 差分(含 A2 案例)
 tests/.../EnsureRaceTest.java          跨執行緒物化視窗回歸(26.2-2 / A1)
