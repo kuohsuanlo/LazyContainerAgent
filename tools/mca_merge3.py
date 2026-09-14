@@ -8,7 +8,7 @@ mca_merge3.py —— 整格「三方合併」還原(取代「整格貼舊備份�
     live   = 線上現況(old + 還原之後玩家的新動作)
     mirror = 事故前最後一份好的鏡像(方塊最新,但容器可能被清空)
   方塊:live == old 的位置 ⟹ 沒人在還原後動過 ⟹ 拿 mirror(把被倒掉的建築補回來);否則保留 live(還原後的新動作優先)。
-  方塊實體:跟著方塊的來源走;同一位置兩邊都有同種容器時,Items 取件數多的那份(平手留 live)。
+  方塊實體:跟著方塊的來源走;同一位置兩邊都有同種容器時,Items 預設三方(live 與 old 內容相同=沒人動過才換成 mirror),--items-rule max 為舊的取多規則。
   Heightmaps 整個拿掉(遊戲載入時自動重算),isLightOn 設 0(重算光照)。其餘欄位全部沿用 live。
 只讀三份輸入、只寫 --out;不碰伺服器。用法:
     mca_merge3.py --live L.mca --old O.mca --mirror M.mca --out OUT.mca --chunks "196,-198 197,-198"
@@ -16,6 +16,9 @@ mca_merge3.py —— 整格「三方合併」還原(取代「整格貼舊備份�
 import argparse, os, struct, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mca_restore as M
+
+ITEMS_RULE = "threeway"
+DROP_RESURRECTED = False
 
 # ── NBT 寫入小工具 ─────────────────────────────────────────────
 def t_name(s):
@@ -106,6 +109,46 @@ def encode_block_states(states, pal_raw):
         ents.append(entry(12, "data", p_long_array(longs)))
     return entry(10, "block_states", p_compound(ents))
 
+def nbt_value(data, p, t):
+    """NBT payload → Python 值(compound=dict、list=tuple),回 (值, 結束位移)。比較內容用,與 key 順序無關。"""
+    if t == 1: return struct.unpack_from(">b", data, p)[0], p + 1
+    if t == 2: return struct.unpack_from(">h", data, p)[0], p + 2
+    if t == 3: return struct.unpack_from(">i", data, p)[0], p + 4
+    if t == 4: return struct.unpack_from(">q", data, p)[0], p + 8
+    if t == 5: return data[p:p + 4], p + 4                     # float 用原始 bytes 比(NaN 也穩定)
+    if t == 6: return data[p:p + 8], p + 8
+    if t == 7:
+        n = M._i32(data, p); return ("b[]", data[p + 4:p + 4 + n]), p + 4 + n
+    if t == 8:
+        n = M._u16(data, p); return data[p + 2:p + 2 + n], p + 2 + n
+    if t == 9:
+        et = data[p]; n = M._i32(data, p + 1); q = p + 5; out = []
+        for _ in range(n):
+            v, q = nbt_value(data, q, et); out.append(v)
+        return ("L", et, tuple(out)), q
+    if t == 10:
+        d = {}; q = p
+        while True:
+            tt = data[q]
+            if tt == 0: return d, q + 1
+            n = M._u16(data, q + 1); k = data[q + 3:q + 3 + n]; q = q + 3 + n
+            v, q = nbt_value(data, q, tt); d[k] = v
+    if t == 11:
+        n = M._i32(data, p); return ("i[]", data[p + 4:p + 4 + 4 * n]), p + 4 + 4 * n
+    if t == 12:
+        n = M._i32(data, p); return ("l[]", data[p + 4:p + 4 + 8 * n]), p + 4 + 8 * n
+    raise ValueError("bad nbt type %d" % t)
+
+def items_value(data, info):
+    """容器 Items 的內容值(清單順序也不管:按 Slot 排序),沒有 Items 回 None。"""
+    if "Items" not in info or info["Items"][0] != 9: return None
+    v, _ = nbt_value(data, info["Items"][2], 9)
+    entries = v[2]
+    try:
+        return tuple(sorted((repr(sorted(e.items())) if isinstance(e, dict) else repr(e)) for e in entries))
+    except Exception:
+        return repr(entries)
+
 def items_total(data, info):
     if "Items" not in info or info["Items"][0] != 9: return -1
     t, es, ps, pe = info["Items"]; et = data[ps]; cnt = M._i32(data, ps + 1); p = ps + 5; total = 0
@@ -123,7 +166,8 @@ def read_bes(data):
     for info, pstart, pend in M.iter_block_entities(data):
         c = M.be_coords(data, info)
         if c is None: continue
-        out[c] = {"id": M.be_id(data, info), "raw": data[pstart:pend], "items": items_total(data, info), "info": info, "data": data}
+        out[c] = {"id": M.be_id(data, info), "raw": data[pstart:pend], "items": items_total(data, info), "info": info, "data": data,
+                  "iv": items_value(data, info)}
     return out
 
 def merge_chunk(live, old, mirror, cx, cz, rep):
@@ -146,6 +190,20 @@ def merge_chunk(live, old, mirror, cx, cz, rep):
         new_sections[y] = merged
     # 方塊實體
     LB = read_bes(live); MB = read_bes(mirror)
+    # 預設:線上現在有的容器一律保留(方塊+內容都用 live)。舊備份「復活」而玩家後來又在用的容器,
+    # 刪掉就是丟東西;要照 old 語意拿掉復活的容器才加 --drop-resurrected。
+    n_kept_live = 0
+    if not DROP_RESURRECTED:
+        for pos, be in LB.items():
+            if "Items" not in be["info"]:
+                continue
+            x, yy, z = pos
+            y = yy >> 4
+            idx = ((yy & 15) * 16 + (z & 15)) * 16 + (x & 15)
+            if src.get((y, idx)) == "mirror" and y in L and L[y]["states"]:
+                new_sections[y][idx] = L[y]["states"][idx]
+                src[(y, idx)] = "live"
+                n_kept_live += 1
     def src_of(pos):
         x, yy, z = pos; y = yy >> 4; idx = ((yy & 15) * 16 + (z & 15)) * 16 + (x & 15)
         return src.get((y, idx), "live")
@@ -155,6 +213,7 @@ def merge_chunk(live, old, mirror, cx, cz, rep):
     for pos, be in MB.items():
         if src_of(pos) == "mirror": result[pos] = be
     n_items_swapped = 0
+    rep_touched = [0]
     def with_items_from(dst, srcbe):
         """把 srcbe 的 Items entry 換進 dst 的 raw(其餘欄位沿用 dst)。"""
         si = srcbe["info"]; sdata = srcbe["data"]
@@ -170,15 +229,29 @@ def merge_chunk(live, old, mirror, cx, cz, rep):
         else:
             new_raw = src_entry + dst["raw"]
         return dict(dst, raw=new_raw)
-    # 同位置、同種容器、兩邊都有 ⟹ 不管方塊來自哪邊,Items 一律取件數多的(平手留已選的那份)
+    # Items 規則(同位置、同種容器、live 與 mirror 都有):
+    #   threeway(預設):live 的 Items 內容 == old 的(從 old 那一刻到現在沒人動過)才換成 mirror 的;有人動過就留 live。
+    #                   不會把「玩家之後拿走的東西」變回來(max 規則會,old 之後隔越久越危險)。
+    #   max:取件數多的(2026-09-12 第一版行為)。
+    OB = read_bes(old)
     for pos in set(LB) & set(MB):
         if pos not in result: continue
         lb, mb = LB[pos], MB[pos]
-        if lb["id"] != mb["id"] or "Items" not in lb["info"] or "Items" not in mb["info"]: continue
+        if lb["id"] != mb["id"] or "Items" not in mb["info"]: continue
         chosen = result[pos]
-        best = mb if mb["items"] > lb["items"] else lb
-        if best["items"] > chosen["items"]:
-            result[pos] = with_items_from(chosen, best); n_items_swapped += 1
+        if ITEMS_RULE == "max":
+            best = mb if mb["items"] > lb["items"] else lb
+            if best["items"] > chosen["items"]:
+                result[pos] = with_items_from(chosen, best); n_items_swapped += 1
+        else:
+            ob = OB.get(pos)
+            untouched = ob is not None and ob["id"] == lb["id"] and ob["iv"] == lb["iv"]
+            if untouched and mb["iv"] != lb["iv"]:
+                if "Items" in lb["info"] or mb["items"] > 0:
+                    result[pos] = with_items_from(chosen, mb); n_items_swapped += 1
+            elif not untouched and mb["iv"] != lb["iv"]:
+                rep_touched[0] += 1
+
     # ── 重組 chunk bytes:sections 逐段換 block_states、換 block_entities、拿掉 Heightmaps、isLightOn=0
     ps = M.root_payload_start(live)
     top = entries_of(live, ps)
@@ -232,8 +305,8 @@ def merge_chunk(live, old, mirror, cx, cz, rep):
         bid = be["id"].replace("minecraft:", "")
         if bid in ("chest", "barrel", "shulker_box", "hopper", "furnace", "dispenser", "dropper") and bid.split("_")[-1] not in blk:
             bad += 1
-    rep.append("chunk %d,%d: 方塊從鏡像補回 %d 格、衝突(保留 live)%d 格;方塊實體 live %d / 鏡像 %d → 合併 %d(Items 取件數多的那份 %d 個;BE 與方塊不符 %d)"
-               % (cx, cz, n_from_mirror, n_conflict, len(LB), len(MB), len(nb), n_items_swapped, bad))
+    rep.append("chunk %d,%d: 方塊從鏡像補回 %d 格、衝突(保留 live)%d 格;方塊實體 live %d / 鏡像 %d → 合併 %d(Items 換成 mirror 的 %d 個;old 之後被動過、留 live 的 %d 個;線上容器保留 %d 個;BE 與方塊不符 %d)"
+               % (cx, cz, n_from_mirror, n_conflict, len(LB), len(MB), len(nb), n_items_swapped, rep_touched[0], n_kept_live, bad))
     if bad: raise SystemExit("有方塊實體落在不對的方塊上,中止")
     return new
 
@@ -241,7 +314,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--live", required=True); ap.add_argument("--old", required=True); ap.add_argument("--mirror", required=True)
     ap.add_argument("--out", required=True); ap.add_argument("--chunks", required=True, help='"cx,cz cx,cz ..."')
+    ap.add_argument("--items-rule", choices=["threeway", "max"], default="threeway")
+    ap.add_argument("--drop-resurrected", action="store_true", help="照 old 語意拿掉 live 上被舊備份復活的容器(預設保留)")
     a = ap.parse_args()
+    global ITEMS_RULE, DROP_RESURRECTED
+    ITEMS_RULE = a.items_rule
+    DROP_RESURRECTED = a.drop_resurrected
     live = M.Region(a.live); old = M.Region(a.old); mir = M.Region(a.mirror)
     raw = live.raw; rep = []
     for tok in a.chunks.split():
