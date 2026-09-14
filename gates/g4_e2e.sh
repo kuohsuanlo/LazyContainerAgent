@@ -61,7 +61,8 @@ for m in $MODES; do
     sm=$(ctr "$ctrs" shadowMismatch); mm=$(ctr "$ctrs" summaryMismatch)
     [ "${st:-0}" -gt 1000 ] && ok "[$m] stash=$st(延遲載入生效)" || fail "[$m] stash=$st 太少"
     [ "${rs:-0}" -gt 1000 ] && ok "[$m] rawSave=$rs(原樣寫回生效)" || fail "[$m] rawSave=$rs 太少"
-    [ "${br:-1}" = 0 ] && ok "[$m] badRaw=0" || fail "[$m] badRaw=$br"
+    # badRaw 是直寫(26.2-4~8)才有的計數器;26.2-2 系列沒有這個欄位
+    if [ "${LC_HAS_PASSTHROUGH:-0}" = 1 ]; then [ "${br:-1}" = 0 ] && ok "[$m] badRaw=0" || fail "[$m] badRaw=$br"; fi
     [ "${el:-1}" = 0 ] && ok "[$m] eagerLoad=0" || fail "[$m] eagerLoad=$el"
     [ "${sm:-1}" = 0 ] && ok "[$m] shadowMismatch=0" || fail "[$m] shadowMismatch=$sm"
     [ "${mm:-1}" = 0 ] && ok "[$m] summaryMismatch=0" || fail "[$m] summaryMismatch=$mm"

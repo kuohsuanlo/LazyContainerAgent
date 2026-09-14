@@ -13,7 +13,8 @@ while read -r label dim reg rx rz; do
   # 第 5 欄=機械事件證據(G4 收的)。核心不支援 tick freeze 時世界會邊比邊動,
   # 只有這些位置的差異算「可解釋」;其餘一律零容忍。支援 freeze 的核心上這份是空的。
   printf 'in-%s\t%s\t%s\t%s\t%s\n' "$label" "$LC_FIXTURES_DIR/$label/$reg.mca" "$E/A/$label/$reg.mca" "" "$E/machinery-all.txt" >> "$LC_RIG/plugins/LcCompare/jobs.txt"
-  printf 'BA-%s\t%s\t%s\t%s\t%s\n' "$label" "$E/B/$label/$reg.mca" "$E/A/$label/$reg.mca" "" "$E/machinery-all.txt" >> "$LC_RIG/plugins/LcCompare/jobs.txt"
+  # B 模式(關直寫)只在有直寫的版本才跑;沒有 B 輸出就不排 BA 比對(否則 NoSuchFile 被算成工作失敗)
+  [ "${LC_HAS_PASSTHROUGH:-0}" = 1 ] && printf 'BA-%s\t%s\t%s\t%s\t%s\n' "$label" "$E/B/$label/$reg.mca" "$E/A/$label/$reg.mca" "" "$E/machinery-all.txt" >> "$LC_RIG/plugins/LcCompare/jobs.txt"
 done < "$LC_FIXTURES_DIR/fixtures.tsv"
 cp "$LC_LIB_DIR/plugins/lccompare/LcCompare.jar" "$LC_RIG/plugins/"
 rig_boot "$R/console.log" -DdisableWatchdog=true || { fail "裁判伺服器沒起來"; tier_verdict; exit 1; }
