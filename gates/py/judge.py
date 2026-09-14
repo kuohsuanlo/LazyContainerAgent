@@ -65,7 +65,9 @@ if fails:
 
 print("== 1. agent / 直寫 ==")
 boot = open(f'{out}/boot.txt').read()
-for s in ('CompoundTag.write/copy carry raw Items', 'getBlockEntityNbtForSaving wrapped', 'transform_failed=0', 'circularity=0'):
+# 直寫(26.2-4~8)的注入點只在 LC_HAS_PASSTHROUGH=1 的版本存在;26.2-2 系列只驗 transform/循環
+HAS_PT = os.environ.get('LC_HAS_PASSTHROUGH', '0') == '1'
+for s in (('CompoundTag.write/copy carry raw Items', 'getBlockEntityNbtForSaving wrapped') if HAS_PT else ()) + ('transform_failed=0', 'circularity=0'):
     (OK if s in boot else F)(f"boot: {s}")
 ctr = open(f'{out}/counters.txt').read().strip().split('\n')[-1]
 def c(name):
@@ -75,15 +77,16 @@ names = ('stash', 'rawSave', 'rawPassthrough', 'rawEmit', 'badRaw', 'ensure', 'a
 v = {n: c(n) for n in names}
 print("  counters: " + " ".join(f"{k}={v[k]}" for k in names))
 (OK if 'active=true' in ctr else F)("active=true")
-(OK if v['rawPassthrough'] and v['rawSave'] and v['rawPassthrough'] >= 0.9 * v['rawSave'] else F)(
-    f"rawPassthrough ≥ 0.9×rawSave({v['rawPassthrough']}/{v['rawSave']})")
-# 直寫只涵蓋 agent 守的三型(箱/木桶/界伏盒);漏斗、發射器那些不在內,門檻要用同一個口徑
-tot_agent = sum(sum(1 for x in census[l]['containers'].values() if x['id'] in AGENT_IDS) for l in LABELS)
-(OK if v['rawPassthrough'] and v['rawPassthrough'] >= 0.5 * tot_agent else F)(
-    f"rawPassthrough {v['rawPassthrough']} ≥ 0.5×普查(箱/木桶/界伏盒){tot_agent}")
-(OK if v['rawEmit'] is not None and v['rawEmit'] >= 0.99 * v['rawPassthrough'] else F)(
-    f"rawEmit {v['rawEmit']} ≥ 0.99×rawPassthrough {v['rawPassthrough']}(側車真的被寫進串流)")
-for n in ('badRaw', 'summaryMismatch', 'shadowMismatch', 'eagerLoad'):
+if HAS_PT:
+    (OK if v['rawPassthrough'] and v['rawSave'] and v['rawPassthrough'] >= 0.9 * v['rawSave'] else F)(
+        f"rawPassthrough ≥ 0.9×rawSave({v['rawPassthrough']}/{v['rawSave']})")
+    # 直寫只涵蓋 agent 守的三型(箱/木桶/界伏盒);漏斗、發射器那些不在內,門檻要用同一個口徑
+    tot_agent = sum(sum(1 for x in census[l]['containers'].values() if x['id'] in AGENT_IDS) for l in LABELS)
+    (OK if v['rawPassthrough'] and v['rawPassthrough'] >= 0.5 * tot_agent else F)(
+        f"rawPassthrough {v['rawPassthrough']} ≥ 0.5×普查(箱/木桶/界伏盒){tot_agent}")
+    (OK if v['rawEmit'] is not None and v['rawEmit'] >= 0.99 * v['rawPassthrough'] else F)(
+        f"rawEmit {v['rawEmit']} ≥ 0.99×rawPassthrough {v['rawPassthrough']}(側車真的被寫進串流)")
+for n in (('badRaw',) if HAS_PT else ()) + ('summaryMismatch', 'shadowMismatch', 'eagerLoad'):
     (OK if v[n] == 0 else F)(f"{n}==0({v[n]})")
 (OK if v['attrHopper'] and v['attrHopper'] > 0 else F)(f"tick step 有推進漏斗(attrHopper={v['attrHopper']})")
 

@@ -271,6 +271,12 @@ public final class LcOpsPlugin extends JavaPlugin implements Listener {
      * 在「擁有目標方塊的區域執行緒」上執行指令。
      * 原廠 Paper 沒有 RegionScheduler,反射拿不到就直接執行(行為與以前相同)。
      */
+    private static final boolean REGIONIZED = detectRegionized();
+    private static boolean detectRegionized() {
+        try { Class.forName("io.papermc.paper.threadedregions.RegionizedServer"); return true; }
+        catch (ClassNotFoundException e) { return false; }
+    }
+
     private boolean dispatchOnOwningRegion(CommandSender sender, String cmd, String tag, StringBuilder fb) {
         java.util.concurrent.atomic.AtomicBoolean ok = new java.util.concurrent.atomic.AtomicBoolean(false);
         java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
@@ -279,6 +285,10 @@ public final class LcOpsPlugin extends JavaPlugin implements Listener {
             catch (Throwable th) { fb.append("EXC ").append(th); }
             finally { done.countDown(); }
         };
+        // 只有真的區域執行緒核心(Folia/EndRod)才繞 RegionScheduler。原廠 Paper 也有 getRegionScheduler(相容 API),
+        // 但它排回主執行緒,而本方法就跑在主執行緒上 —— 在這裡 await 等於自己等自己:每條卡 10 秒 TIMEOUT,
+        // 指令在快照之後才生效(2026-09-14 26.2-10 全關:17 條「沒回饋」、26 條正控制不成立,全是這個)。
+        if (!REGIONIZED) { run.run(); return ok.get(); }
         try {
             String[] xyz = tag.substring(tag.indexOf(':') + 1).split(",");
             java.util.regex.Matcher m = java.util.regex.Pattern.compile("in minecraft:([a-z_]+)").matcher(cmd);

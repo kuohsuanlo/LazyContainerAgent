@@ -121,7 +121,7 @@ sleep 8; rig_kill; rm -f "$LC_RIG/plugins/LcCompare.jar"
 cp "$LC_RIG/plugins/LcCompare/report-"*.json "$W/" 2>/dev/null
 grep -a "LCCOMPARE" "$W/compare-console.log" | sed 's/.*\] //; s/^/     /'
 
-python3 "$LC_LIB_DIR/py/judge.py" "$LC_FIXTURES_DIR" "$W" "$OPS" "$RUN_START" > "$W/verdict.txt" 2>&1
+LC_HAS_PASSTHROUGH="${LC_HAS_PASSTHROUGH:-0}" python3 "$LC_LIB_DIR/py/judge.py" "$LC_FIXTURES_DIR" "$W" "$OPS" "$RUN_START" > "$W/verdict.txt" 2>&1
 rc=$?; cat "$W/verdict.txt" | sed 's/^/     /'
 [ $rc -eq 0 ] && ok "互動對抗總判定 PASS" || fail "互動對抗總判定 FAIL(見 $W/verdict.txt)"
 tier_verdict
