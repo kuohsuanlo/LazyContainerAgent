@@ -163,7 +163,7 @@ public abstract class LazyContainerTemplate extends BaseContainerBlockEntity {
             long rawBytes0 = LazyContainerRuntime.rawLength(encoded);
             this.lazycontainer$rawLen = (int) Math.min((long) Integer.MAX_VALUE, rawBytes0);
             try {
-                LazyContainerRuntime.onRawStored(rawBytes0, this.getBlockPos().toShortString());
+                LazyContainerRuntime.onRawStored(rawBytes0, this.getBlockPos());
             } catch (Throwable ignored) {
                 // 觀測失敗絕不影響載入
             }

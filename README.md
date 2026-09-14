@@ -121,7 +121,7 @@ vanilla 載入一個放滿地圖畫/唱片的箱子,光把物品從 NBT 解出�
 
 本 agent 把這個呼叫改掉了(`lazycontainer$load`,template:141)。它做三件事,順序是固定的:
 
-1. 把「Items」那棵子樹原封序列化成一段 bytes 存起來。整棵 chunk 樹隨後可以被回收,記憶體只留這段 bytes。
+1. 把「Items」那棵子樹原封序列化成 bytes 存起來(26.2-10 起是每段 ≤256 KB 的分段,不再是一整塊大陣列)。整棵 chunk 樹隨後可以被回收,記憶體只留這些 bytes。
 2. 趁樹還在手上,順便算一張**摘要**(下面第 ④ 步會用)。
 3. 最後才把「尚未解碼」的旗標打開。
 
@@ -229,6 +229,23 @@ log 裡的 `fullQ=` 四個數字就是「證明滿 / 證明不滿 / 答不出來
 | 解碼歸因與計時 | 記錄是誰、花多久、慢的印座標 | 每次解碼 | `attr*` `decodeMs` `decodeHist` |
 | 安全退路 | 任何意外一律退回原版行為 | 全路徑 | `eagerLoad` |
 | shadow 驗證 | 上線前把兩種做法都算一遍逐位元組對照 | 開旗標時 | `shadowMismatch` |
+| 分段 raw(26.2-10) | bytes 分成 ≤256 KB 的段,不倍增、不整份複製,永遠不產生 G1 humongous 物件;寫出的 bytes 與舊版逐位元組相同 | chunk 載入 | `rawMaxKB` `rawBig` |
+| chunk 權重(26.2-10) | 每箱記下載入時的大小,`lazycontainer$chunkWeight` 加總給 ChunkHoldManager 判斷「重的格」 | 外掛查詢時 | — |
+
+### 26.2-10 改了什麼(2026-09-14,交付單 #329 / #331)
+
+兩張單的共同根是「巨箱 chunk 反覆載入 / 卸載」:每跨一次邊界就付一次整格處理。26.2-10 做兩件事,**都不碰存檔內容**:
+
+1. **分段 raw**:舊版 `encodeRaw` 用會倍增的緩衝再整份複製,一個 26 MB 的箱子光載入就配出一串超過 G1 humongous 門檻的物件
+   (s18 終界:region 4 MB ⟹ 門檻 2 MB,gc.log 1,742 行 humongous,每小時數次 Full GC 全 JVM 停 2–6 秒)。
+   改成每段 ≤256 KB 的分段:不倍增、不整份複製、沒有「先估大小、估錯就爆掉」這種失敗情況。
+   真實 region 56,265 個容器對拍:**分段版與舊版位元組不同 = 0**;順便快了一點(讀取端沒有 `ByteArrayInputStream` 的 synchronized)。
+2. **chunk 權重**:每箱記下載入時的大小(物化後不清,避免權重抖動),`lazycontainer$chunkWeight(LevelChunk)` 把整格加總。
+   給姊妹外掛 [ChunkHoldManager](../ChunkHoldManager/) 用:重的格掛 plugin ticket 晚一點卸載、輕的格不碰。
+   這是 2026-06 ChunkForceManager 做不到的事 —— 它為了秤重去序列化每個物品,把 s48 秤到 OOM;現在秤是免費的。
+
+沒做的:卸載存檔那一次 NBT 解析仍在 region 執行緒上(#329 卡的那幾秒)。要讓它消失只有直寫(已封殺)或平行預解析(服主裁示不做)。
+ChunkHoldManager 做的是把次數壓下來。
 
 ### 已經拔掉、不在線上的東西
 
@@ -259,6 +276,7 @@ log 裡的 `fullQ=` 四個數字就是「證明滿 / 證明不滿 / 答不出來
 - `ensure` 相對 `stash` 越小越好,代表大多數箱子從沒被碰過。
 - `rawSave` = 這段時間有多少次「沒被碰過的箱子」走了省事的存檔路徑。
 - `eagerLoad` `shadowMismatch` `summaryMismatch` **正常恆為 0**,不是 0 就要查。
+- `rawMaxKB` = 看過最大的單一箱子(KB);`rawBig` = 超過 4 MB 的箱子數。超過 4 MB 會印一行 `[LazyContainer] BIG CONTAINER … KB @ x, y, z`(最多 40 行,純提示不是錯誤;`-Dlazycontainer.bigRaw.bytes` 可調)。
 - 統計行裡如果出現 `rawPassthrough` `keptRaw` `badWrite` 這類字,代表跑的是**已拔除的舊版本**,該台要換回 26.2-2。
 
 ### 求證表
@@ -515,6 +533,8 @@ tools/scan_containers.py        掃 region 檔找箱子最密的 chunk(找「載
 tools/mca_restore.py            離線修/還原區塊檔(verify/list/restore-chunk/restore-items)
 tools/mca_merge3.py             整格三方合併還原(避免整格貼舊備份把新建築倒掉)
 tools/decode_bench.sh           離線量存檔路徑 NBT 解析與物品解碼的成本(序列 vs 多核心)
+gates/chunkhold_e2e.sh          ChunkHoldManager 真伺服器端對端(Paper / EndRod rig)
+tests/.../RawSegmentsTest.java  分段 raw 與舊版逐位元組對拍
 tests/.../SummaryDifferentialTest.java  摘要 vs 真 codec 差分(含 A2 案例)
 tests/.../EnsureRaceTest.java          跨執行緒物化視窗回歸(26.2-2 / A1)
 tests/.../NmsTestSupport.java          零 Minecraft server 的 headless NMS 啟動

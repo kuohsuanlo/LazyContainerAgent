@@ -212,9 +212,10 @@ public final class LazyContainerRuntime {
 
     /**
      * 載入時記一筆 raw 大小:更新最大值,超過門檻就印一行座標(限流)。
-     * <p>純觀測,絕不改變載入行為;任何例外都吞掉。</p>
+     * <p>純觀測,絕不改變載入行為;呼叫端已包 try/catch。{@code pos} 傳物件不傳字串:
+     * 只有要印的那一次才 toString,熱路徑零字串配置。</p>
      */
-    public static void onRawStored(long bytes, String pos) {
+    public static void onRawStored(long bytes, Object pos) {
         long prev = rawMaxBytes.get();
         while (bytes > prev && !rawMaxBytes.compareAndSet(prev, bytes)) {
             prev = rawMaxBytes.get();
@@ -224,7 +225,8 @@ public final class LazyContainerRuntime {
         }
         rawBig.incrementAndGet();
         if (rawBigLogged.incrementAndGet() <= BIG_RAW_LOG_MAX) {
-            System.out.println("[LazyContainer] BIG CONTAINER " + (bytes / 1024) + " KB @ " + pos
+            // 座標字串只在真的要印時才建(每個容器載入都建字串 = 每格幾百次無謂配置)
+            System.out.println("[LazyContainer] BIG CONTAINER " + (bytes / 1024) + " KB @ " + String.valueOf(pos)
                     + " —— 這格載入/存檔都特別貴,可考慮讓它少反覆載卸");
         }
     }
