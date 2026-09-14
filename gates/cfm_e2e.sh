@@ -48,7 +48,7 @@ sleep 25
 rig_send "cforce status" 2
 st=$(grep -a "\[cforce\] pinned=" "$L" | tail -1 | sed 's/.*\[cforce\] //'); echo "status(載入後): $st"
 probe=$(echo "$st" | grep -oE "probe=[A-Za-z]+" | cut -d= -f2)
-[ "$probe" = ok ] && ok "反射入口就緒" || fail "probe=$probe"
+if [ "$ENDROD" = 1 ]; then [ "$probe" = ok ] && ok "反射入口就緒" || fail "probe=$probe"; else [ "$probe" = pending ] && ok "Paper:自動路徑從未啟動(probe=pending,符合預期)" || fail "Paper 上 probe=$probe(自動路徑不該跑)"; fi
 auto=$(echo "$st" | grep -oE "auto [0-9]+" | awk '{print $2}'); held=$(echo "$st" | grep -oE "held=[0-9.]+MB" | cut -d= -f2)
 ev=$(echo "$st" | grep -oE "evicted=[0-9]+" | cut -d= -f2); sk=$(echo "$st" | grep -oE "skippedBudget=[0-9]+" | cut -d= -f2); rj=$(echo "$st" | grep -oE "apiRejects=[0-9]+" | cut -d= -f2)
 if [ "$ENDROD" = 1 ]; then
